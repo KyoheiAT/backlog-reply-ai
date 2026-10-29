@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Backlog AI Reply 設定</title>
+  <style>
+    body{font:15px/1.7 system-ui,sans-serif;max-width:740px;margin:36px auto;padding:0 24px;color:#17212c;background:#fff}h1{font-size:26px}h2{font-size:19px;margin-top:32px}label{display:block;margin:20px 0 6px;font-weight:600}input,select{width:100%;padding:10px;box-sizing:border-box;border:1px solid #aab2be;border-radius:6px;font:inherit}button{margin-top:20px;background:#245bba;color:#fff;border:0;border-radius:6px;padding:10px 20px;cursor:pointer;font:inherit}button:disabled{opacity:.55;cursor:default}.note{color:#526071}.info{background:#eef5ff;padding:14px;border-radius:8px}.error{color:#ae2636}.success{color:#167548}code{overflow-wrap:anywhere}pre{padding:12px;background:#f3f5f8;white-space:pre-wrap;overflow-wrap:anywhere}p{margin:10px 0}.model-actions{display:flex;align-items:center;gap:12px;margin-top:8px}.model-actions button{flex-shrink:0;margin:0;background:#eaf0fa;color:#245bba;padding:7px 12px;font-size:13px}.model-status{font-size:13px;overflow-wrap:anywhere}.model-description,.model-note{font-size:13px;overflow-wrap:anywhere}[hidden]{display:none!important}@media(max-width:560px){.model-actions{align-items:flex-start;flex-direction:column}}
+  </style>
+  <style>
+    .prompt-section{margin-top:36px;padding-top:8px;border-top:1px solid #d6dce6}.prompt-section textarea{display:block;width:100%;box-sizing:border-box;padding:10px;border:1px solid #aab2be;border-radius:6px;font:14px/1.7 system-ui,sans-serif;resize:vertical}.prompt-section textarea[readonly]{background:#f3f5f8}.prompt-checkbox{display:flex;align-items:flex-start;gap:9px;font-size:14px}.prompt-checkbox input{width:auto;flex-shrink:0;margin-top:6px}.prompt-actions{display:flex;flex-wrap:wrap;gap:10px}.prompt-actions button{padding:9px 14px}.prompt-secondary{background:#eaf0fa;color:#245bba}.prompt-meta,.prompt-sources{font-size:13px;overflow-wrap:anywhere}.prompt-sources ul{padding-left:22px}.prompt-section :focus-visible{outline:2px solid #245bba;outline-offset:3px}
+  </style>
+</head>
+<body>
+  <h1>Backlog AI Reply 設定</h1>
+  <p class="info">AI APIキーは不要です。PC上のローカル接続を通じ、ログイン済みのGitHub CopilotまたはChatGPT Business（Codex）で返信案を作成します。契約の利用枠を消費します。</p>
+  <form id="settingsForm">
+    <label for="provider">利用するAI</label>
+    <select id="provider"><option value="copilot">GitHub Copilot</option><option value="codex">ChatGPT Business（Codex）</option></select>
+    <div id="copilotFields">
+      <label for="copilotModelSelect">Copilotモデル</label>
+      <select id="copilotModelSelect"><option value="">自動選択（既定）</option><option value="@manual">モデルIDを直接指定</option></select>
+      <p id="copilotModelDescription" class="note model-description" hidden></p>
+      <div class="model-actions"><button id="copilotRefreshModels" type="button">一覧を更新</button><span id="copilotModelsStatus" class="note model-status" role="status" aria-live="polite"></span></div>
+      <p id="copilotModelNote" class="note model-note" hidden></p>
+      <div id="copilotManualFields" hidden><label for="copilotModel">CopilotモデルID</label><input id="copilotModel" type="text" maxlength="100" autocomplete="off" spellcheck="false" placeholder="モデルIDを入力（空欄で自動選択）" disabled></div>
+    </div>
+    <div id="codexFields" hidden>
+      <label for="codexModelSelect">Codexモデル</label>
+      <select id="codexModelSelect"><option value="">自動選択（既定）</option><option value="@manual">モデルIDを直接指定</option></select>
+      <p id="codexModelDescription" class="note model-description" hidden></p>
+      <div class="model-actions"><button id="codexRefreshModels" type="button">一覧を更新</button><span id="codexModelsStatus" class="note model-status" role="status" aria-live="polite"></span></div>
+      <p id="codexModelNote" class="note model-note" hidden></p>
+      <div id="codexManualFields" hidden><label for="codexModel">CodexモデルID</label><input id="codexModel" type="text" maxlength="100" autocomplete="off" spellcheck="false" placeholder="モデルIDを入力（空欄で自動選択）" disabled></div>
+    </div>
+    <p class="note">一覧はモデルの候補です。利用可否は契約・組織の設定によります。取得に失敗しても自動選択や直接指定で保存できます。一覧の取得では文章を生成しません。</p>
+    <label for="backlogKey">Backlog APIキー</label><input id="backlogKey" type="password" autocomplete="off" required>
+    <p class="note">課題本文・コメントの取得に必要です。Backlogの個人設定で発行できます。Chromeのローカル拡張ストレージに保存し、エージェントモードではPC上のBacklog MCPにも認証用として渡します。AIには送信しません。</p>
+    <label for="backlogSpaceUrl">起動時に確認するBacklogスペースURL（任意）</label>
+    <input id="backlogSpaceUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://your-space.backlog.com" aria-describedby="formattingNote">
+    <p id="formattingNote" class="note">Chrome起動時にスペースの記法設定を取得します。空欄の場合は、保存済みの本人プロフィールURL、最後に開いた課題のスペースの順で自動判定します。返信を作る際は対象プロジェクトの記法設定を確認し、Markdown記法／Backlog記法を使い分けます。</p>
+    <div class="model-actions"><button id="refreshFormatting" type="button">記法を再確認</button><span id="formattingStatus" class="note model-status" role="status" aria-live="polite"></span></div>
+    <p id="formattingDetails" class="note model-status"></p>
+    <p class="note">再確認には保存済みのURL・APIキーを使います。編集した場合は、先に「設定を保存」を押してください。記法の取得にAIの利用枠は使いません。</p>
+    <label for="maxComments">取得する直近コメント件数（1〜100）</label><input id="maxComments" type="number" min="1" max="100" step="1" required>
+    <button id="save" type="submit">設定を保存</button><p id="status" role="status" aria-live="polite"></p>
+  </form>
+  <section class="prompt-section" aria-labelledby="promptHeading">
+    <h2 id="promptHeading">共通プロンプトと本人情報</h2>
+    <p class="info">表示名を登録すると、Chrome起動時にBacklogの公式ガイドを読み、保存済みのAI・モデルで共通プロンプトを生成します。生成するたびに契約の利用枠を消費します。以下の設定は、上のAI・APIキー設定とは別に保存します。</p>
+    <p class="note">参照するのは公式の5記事です。「課題と状態」「お知らせ機能の概要」「プロジェクトの基本設定」と、Backlog記法・Markdown記法のガイドを使います。</p>
+    <form id="promptForm">
+      <label for="promptDisplayName">返信する本人の表示名</label>
+      <input id="promptDisplayName" type="text" maxlength="100" autocomplete="off" placeholder="例：山田太郎" aria-describedby="promptIdentityNote">
+      <label for="promptProfileUrl">本人のBacklogプロフィールURL（任意）</label>
+      <input id="promptProfileUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://your-space.backlog.com/user/*" aria-describedby="promptIdentityNote">
+      <p id="promptIdentityNote" class="note">表示名とURLを別々に入力します。URLは対応BacklogドメインのHTTPSの /user/… 形式です。末尾の * も保存できます。表示名が未登録の場合、自動生成をスキップします。</p>
+      <label for="promptGenerated">生成プロンプト（確認・編集できます）</label>
+      <textarea id="promptGenerated" rows="12" maxlength="12000" aria-describedby="promptGeneratedNote"></textarea>
+      <p id="promptGeneratedNote" class="note">再生成すると、この欄を新しい生成結果で置き換えます。編集した内容を使い続ける場合は、固定をオンにして保存してください。生成失敗時は以前の内容を保持します。</p>
+      <label class="prompt-checkbox" for="promptLocked"><input id="promptLocked" type="checkbox"><span>生成プロンプトを固定（起動時・手動の再生成を停止）</span></label>
+      <label for="promptFixed">常に追加する指示</label>
+      <textarea id="promptFixed" rows="6" maxlength="10000" placeholder="例：返信は簡潔にし、確認してほしい点を最後にまとめる。" aria-describedby="promptFixedNote"></textarea>
+      <button id="promptResetFixed" class="prompt-secondary" type="button" aria-describedby="promptFixedNote" disabled>デフォルトに戻す</button>
+      <p id="promptFixedNote" class="note">標準プロンプトを編集して使えます。「デフォルトに戻す」はこの欄だけを標準に戻します。変更後は「プロンプト設定を保存」で適用してください。保存後は毎回の返信作成に追加し、自動・手動の再生成では変更しません。共通の安全ルールも引き続き適用します。</p>
+      <p class="note">標準では、完成文を外側のコードブロックで囲まず、コメント欄にそのまま使える文面を出力します。</p>
+      <div class="prompt-actions">
+        <button id="promptSave" type="submit" disabled>プロンプト設定を保存</button>
+        <button id="promptRegenerate" type="button" disabled>保存して再生成</button>
+        <button id="promptReload" class="prompt-secondary" type="button">保存済みを読み直す</button>
+      </div>
+      <p id="promptFeedback" role="status" aria-live="polite"></p>
+      <p id="promptDirty" class="note" hidden></p>
+    </form>
+    <p id="promptGenerationStatus" role="status" aria-live="polite"></p>
+    <p id="promptMeta" class="note prompt-meta"></p>
+    <div id="promptSources" class="prompt-sources" hidden></div>
+    <label for="promptEffective">保存済みの共通プロンプト全体（読み取り専用）</label>
+    <textarea id="promptEffective" rows="12" readonly aria-describedby="promptEffectiveNote"></textarea>
+    <p id="promptEffectiveNote" class="note">共通ルール、本人情報、生成プロンプト、常に追加する指示を合成した内容です。未保存の編集は反映しません。生成中も編集・保存・固定ができます。生成開始後に設定を保存した場合、その古い設定に基づく生成結果は採用しません。</p>
+    <p class="note">公式ガイドの取得にBacklog APIキーは使いません。表示名・プロフィールURL・プロンプト設定は、このChromeのローカル拡張ストレージに保存します。</p>
+  </section>
+  <h2>初回だけ行うローカル接続の登録</h2>
+  <p>この拡張のID: <code id="extensionId"></code></p>
+  <p class="note">READMEの初期設定とCLIへのログインを済ませ、このアプリのフォルダーで次のコマンドを一度実行してください。アプリのフォルダーを移動した場合や拡張IDが変わった場合は、再登録が必要です。</p>
+  <pre id="setupCommand"></pre>
+  <p class="info">登録後は生成ボタンを押すだけです。Chromeが必要なときに接続プログラムを起動し、処理後に接続を終了します。毎回のコマンド実行やターミナルの起動は不要です。</p>
+  <button id="checkBridge" type="button">自動起動と接続をテスト</button><p id="connectionStatus" role="status" aria-live="polite"></p>
+  <p class="note">接続テストはローカル接続の起動と通信だけを確認し、終了します。AIへのログイン・利用上限の確認や文章生成は行いません。</p>
+  <p class="note">生成時に課題本文・コメント・指示を選択したAIへ送信します。業務データの取り扱い方針を確認して利用してください。コメントは自動投稿しません。</p>
+  <script src="options.js"></script>
+  <script src="prompt-options.js"></script>
+</body>
+</html>

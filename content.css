@@ -1,0 +1,29 @@
+#bcr-root{font-family:system-ui,-apple-system,sans-serif;border:1px solid #d6dce6;background:#f7f9fc;border-radius:8px;padding:14px;margin:12px 0;box-sizing:border-box;max-width:100%;color:#17212c}#bcr-root .bcr-title{font-size:14px;font-weight:700;margin:0 0 9px}#bcr-root .bcr-provider{display:inline-block;margin-left:6px;color:#245bba;font-size:12px}#bcr-root .bcr-note{font-size:12px;color:#526071;line-height:1.6;margin:7px 0 10px}#bcr-root .bcr-label{display:block;font-size:13px;font-weight:600;margin:12px 0 6px}#bcr-root textarea,#bcr-root select{box-sizing:border-box;width:100%;padding:9px;border:1px solid #c3cbd6;border-radius:5px;background:white;color:#17212c;font:13px/1.5 system-ui,sans-serif}#bcr-root textarea{min-height:72px;resize:vertical}#bcr-root .bcr-references{min-height:58px}#bcr-root textarea:disabled,#bcr-root select:disabled{opacity:.65;cursor:default}#bcr-root .bcr-actions{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:9px}#bcr-root button{background:#245bba;color:white;border:0;border-radius:5px;padding:8px 12px;cursor:pointer;font-size:13px;flex-shrink:0}#bcr-root button:disabled{opacity:.55;cursor:default}#bcr-root .bcr-status{font-size:12px;line-height:1.5;flex:1;overflow-wrap:anywhere}#bcr-root .bcr-error{color:#ae2636}#bcr-root .bcr-ok{color:#167548}#bcr-root .bcr-sources{margin-top:12px;padding-top:10px;border-top:1px solid #d6dce6;font-size:12px;line-height:1.6}#bcr-root .bcr-sources-title{font-weight:600}#bcr-root .bcr-sources ul{margin:6px 0 0;padding-left:20px}#bcr-root .bcr-sources a{color:#245bba;text-decoration:underline;overflow-wrap:anywhere}#bcr-root [hidden]{display:none!important}@media(max-width:560px){#bcr-root .bcr-actions{align-items:stretch;flex-direction:column}}
+
+#bcr-root .bcr-fields{min-width:0;margin:0;padding:0;border:0}#bcr-root .bcr-visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}#bcr-root :is(textarea,select,button,a):focus-visible{outline:2px solid #245bba;outline-offset:2px}
+
+#bcr-root .bcr-header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+#bcr-root .bcr-checkbox{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.6;cursor:pointer}
+#bcr-root .bcr-checkbox input{flex:0 0 auto;width:16px;height:16px;margin:3px 0 0;accent-color:#245bba}
+#bcr-root .bcr-checkbox input:disabled{opacity:.65;cursor:default}
+#bcr-root .bcr-checkbox input:focus-visible{outline:2px solid #245bba;outline-offset:2px}
+#bcr-root .bcr-title{margin:0;min-width:0}
+#bcr-root .bcr-progress{margin-top:12px;padding:10px 12px;border:1px solid #d6dce6;border-radius:6px;background:#fff;font-size:12px;line-height:1.6;cursor:default}
+#bcr-root .bcr-progress-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:600}
+#bcr-root .bcr-progress-note{margin:4px 0;color:#526071;font-size:11px}
+#bcr-root .bcr-elapsed{color:#526071;font-weight:400;font-variant-numeric:tabular-nums}
+#bcr-root .bcr-progress-list{max-height:140px;overflow:auto;margin:6px 0 0;padding-left:22px;overflow-wrap:anywhere}
+#bcr-root .bcr-progress-list li{padding:2px 0;font-variant-numeric:tabular-nums}
+#bcr-root .bcr-progress-list .bcr-progress-current{color:#245bba;font-weight:600}
+#bcr-root .bcr-sources summary{cursor:pointer;width:fit-content;max-width:100%}
+#bcr-root .bcr-sources summary:focus-visible{outline:2px solid #245bba;outline-offset:2px}
+#bcr-root .bcr-toggle{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:4px 10px;border:1px solid #c3cbd6;border-radius:999px;background:#edf1f6;color:#34465d;font:12px/1.5 system-ui,sans-serif;white-space:nowrap;opacity:1;transition:opacity .15s,background-color .15s}
+#bcr-root .bcr-toggle::before{content:'▾';font-size:11px}
+#bcr-root .bcr-toggle:hover{background:#e1e9f4}
+#bcr-root.bcr-collapsed{width:fit-content;max-width:100%;padding:0;margin:6px 0;border:0;background:transparent;border-radius:999px}
+#bcr-root.bcr-collapsed .bcr-header{gap:0}
+#bcr-root.bcr-collapsed .bcr-toggle{opacity:.55}
+#bcr-root.bcr-collapsed .bcr-toggle::before{content:'▸'}
+#bcr-root.bcr-collapsed .bcr-toggle:is(:hover,:focus){opacity:1}
+@media(prefers-reduced-motion:reduce){#bcr-root .bcr-toggle{transition:none}}
+@media(forced-colors:active){#bcr-root.bcr-collapsed .bcr-toggle{opacity:1}}

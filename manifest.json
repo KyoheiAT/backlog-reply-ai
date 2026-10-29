@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Backlog AI Reply",
+  "version": "0.4.0",
+  "minimum_chrome_version": "120",
+  "description": "GitHub Copilot または ChatGPT Business（Codex）でBacklogの返信案を作成。AI APIキー不要。",
+  "permissions": ["storage", "nativeMessaging"],
+  "host_permissions": ["https://*.backlog.com/*", "https://*.backlog.jp/*", "https://*.backlogtool.com/*"],
+  "options_page": "options.html",
+  "content_scripts": [{
+    "matches": ["https://*.backlog.com/*", "https://*.backlog.jp/*", "https://*.backlogtool.com/*"],
+    "js": ["content.js"],
+    "css": ["content.css"],
+    "run_at": "document_idle"
+  }],
+  "background": {"service_worker": "background.js"}
+}

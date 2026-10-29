@@ -1,0 +1,29 @@
+{
+  "name": "backlog-ai-reply",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Backlog reply drafts with local Copilot or Codex sign-in",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node bridge/server.mjs",
+    "setup": "node scripts/setup-native.mjs",
+    "unsetup": "node scripts/setup-native.mjs --uninstall",
+    "test": "node --test tests/*.test.mjs",
+    "smoke:copilot": "node scripts/smoke.mjs copilot",
+    "smoke:codex": "node scripts/smoke.mjs codex"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.27",
+    "backlog-mcp-server": "0.23.3"
+  },
+  "overrides": {
+    "@github/copilot-sdk": {
+      "zod": "4.6.6"
+    }
+  },
+  "allowScripts": {
+    "koffi": false
+  }
+}

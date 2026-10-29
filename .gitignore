@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.env
+.env.*
+coverage/
+.native-host/
+/backlog-ai.zip
