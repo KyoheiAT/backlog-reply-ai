@@ -307,7 +307,12 @@ test('format instructions preserve application precedence and provide syntax for
   assert.match(backlog, /Backlog記法を使います/);
   assert.ok(backlog.includes("''強調''") && backlog.includes('[[表示名:URL]]') && backlog.includes('{quote}'));
   assert.match(unknown, /プレーンテキスト/);
-  for (const text of [markdown, backlog, unknown]) assert.match(text, /出力先の設定を優先/);
+  for (const text of [markdown, backlog, unknown]) {
+    assert.match(text, /出力先の設定を優先/);
+    assert.match(text, /宛名だけを独立した行/);
+    assert.match(text, /引用と回答の間にも空行/);
+    assert.match(text, /実際の改行文字/);
+  }
 });
 
 test('explicit refresh still reads the server alongside a fresh cache lookup', async () => {

@@ -150,15 +150,30 @@
       range.selectNodeContents(editor);
       selection.removeAllRanges();
       selection.addRange(range);
-      let inserted = false;
-      try { inserted = document.execCommand('insertText', false, value); } catch (_) {}
-      if (!inserted || editor.innerText.replace(/\r\n?/g, '\n').trim() !== value.trim()) {
-        editor.replaceChildren();
-        value.split('\n').forEach((line, index) => {
-          if (index > 0) editor.appendChild(document.createElement('br'));
-          if (line) editor.appendChild(document.createTextNode(line));
-        });
-        editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: value}));
+      let handledPaste = false;
+      try {
+        // Rich-text editors keep their own paragraph model. Let their paste
+        // handler import plain text instead of overwriting only their DOM.
+        // This creates event data locally; it never reads/writes the OS clipboard.
+        const clipboardData = new DataTransfer();
+        clipboardData.setData('text/plain', value);
+        handledPaste = !editor.dispatchEvent(new ClipboardEvent('paste', {
+          clipboardData, bubbles: true, cancelable: true, composed: true
+        }));
+      } catch (_) { /* Older or restricted editors can use the fallback below. */ }
+      // preventDefault means the editor consumed the paste, possibly with an
+      // asynchronous render. Do not replace its DOM while that update is pending.
+      if (!handledPaste) {
+        let inserted = false;
+        try { inserted = document.execCommand('insertText', false, value); } catch (_) {}
+        if (!inserted || editor.innerText.replace(/\r\n?/g, '\n').trim() !== value.trim()) {
+          editor.replaceChildren();
+          value.split('\n').forEach((line, index) => {
+            if (index > 0) editor.appendChild(document.createElement('br'));
+            if (line) editor.appendChild(document.createTextNode(line));
+          });
+          editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: value}));
+        }
       }
     } else throw new Error('対応していない入力欄です。');
     editor.focus();

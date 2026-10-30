@@ -669,6 +669,8 @@ test('both providers and modes use the output project format over space defaults
     const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
     const formatOffset = request.prompt.indexOf('返信の出力記法（アプリがBacklog APIで確認した設定');
     assert.ok(formatOffset > request.prompt.indexOf(`古い指示：${other}を使用`));
+    assert.match(request.prompt.slice(formatOffset), /宛名だけを独立した行/);
+    assert.match(request.prompt.slice(formatOffset), /引用と回答の間にも空行/);
     assert.match(request.prompt.slice(formatOffset), new RegExp(rule === 'markdown' ? 'Markdown記法を使います' : 'Backlog記法を使います'));
     const context = JSON.parse(request.prompt.slice(request.prompt.lastIndexOf('\n\n') + 2));
     assert.equal(context.outputFormatting.rule, rule);

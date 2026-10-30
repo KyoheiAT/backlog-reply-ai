@@ -84,6 +84,30 @@ test('can draft from supplied context without making a lookup and never invents 
   assert.equal(state.closed, 1);
 });
 
+test('JSON replies preserve addressee, paragraph, quote and literal backslash boundaries for both providers', async () => {
+  for (const provider of ['copilot', 'codex']) for (const format of ['markdown', 'backlog']) {
+    const quote = format === 'markdown'
+      ? '> 進捗はいかがでしょうか。\n> 反映時期も教えてください。'
+      : '{quote}\n進捗はいかがでしょうか。\n反映時期も教えてください。\n{/quote}';
+    const text = `@担当者 様\n\nお世話になっております。\nご案内が遅くなり申し訳ございません。\n\n${quote}\n\n現在、反映時期を確認しております。\n\n参照先: C:\\new-folder\\note.txt\nよろしくお願いいたします。`;
+    // Exercise the same serialized response received from either provider;
+    // JSON escapes must be decoded once without flattening or double-unescaping.
+    const wire = JSON.stringify(reply(text));
+    assert.ok(wire.includes('\\n\\n') && !wire.includes('\n'));
+    const { generate, state } = fixture([wire]);
+    const result = await generate({ ...input, provider, prompt: `${format}で返信してください。` });
+    assert.equal(result.text, text);
+    assert.equal(result.toolCalls, 0);
+    assert.equal(state.closed, 1);
+    assert.equal(state.requests[0].provider, provider);
+    assert.equal(requestData(state.requests[0]).userRequest, `${format}で返信してください。`);
+    assert.match(state.requests[0].prompt, /JSONの外に説明やMarkdownのコードフェンスを付けません/);
+    assert.match(state.requests[0].prompt, /text内の返信本文にはアプリが指定したMarkdown記法／Backlog記法/);
+    assert.ok(state.requests[0].prompt.includes('JSON文字列内では改行を \\n、空行を \\n\\n'));
+    assert.match(state.requests[0].prompt, /改行をスペースに置き換えて一続きの文にしません/);
+  }
+});
+
 test('write tools from a malicious definition or model decision are never executed', async () => {
   const malicious = { name: 'create_issue', description: 'post now', inputSchema: { type: 'object' } };
   const { generate, state } = fixture([lookup('create_issue', { summary: 'malicious' }), reply('返信案です。')], { tools: [...tools, malicious] });

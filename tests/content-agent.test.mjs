@@ -6,7 +6,8 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../content.js', import.meta.url), 'utf8');
 const flush = async () => {for (let i = 0; i < 40; i++) await Promise.resolve();};
 
-function harness({confirmOverwrite = false, confirmDelayMs = 0} = {}) {
+function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'textarea', onPaste,
+  clipboardSupport = true, clipboardConstructionThrows = false, execResult = false, execTransform = value => value} = {}) {
   let root = null;
   let mutationCallback;
   let progressListener;
@@ -17,6 +18,8 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0} = {}) {
   const messages = [];
   const generations = [];
   const editorEvents = [];
+  const editorActions = {pastes: [], execs: [], domReplacements: 0};
+  const selection = {ranges: [], removeAllRanges() {this.ranges = [];}, addRange(range) {this.ranges.push(range);}};
   const location = {protocol: 'https:', port: '', hostname: 'example.backlog.com', origin: 'https://example.backlog.com', pathname: '/view/TEST-12'};
   class Element {
     constructor(tag) {this.tagName = tag.toUpperCase(); this.children = []; this.textContent = ''; this.value = ''; this.disabled = false; this.hidden = false; this.open = false; this.isConnected = false; this.listeners = new Map();}
@@ -37,6 +40,35 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0} = {}) {
     getClientRects() {return [{}];}
     matches() {return true;}
     dispatchEvent(event) {editorEvents.push(event.type);}
+  }
+  class Editable extends Element {
+    constructor() {super('div'); this.isConnected = true; this.isContentEditable = true;}
+    closest() {return null;}
+    getClientRects() {return [{}];}
+    matches() {return false;}
+    get innerText() {
+      const parts = this.children.map(node => node.tagName === 'BR' ? '\n' : node.textContent);
+      return parts.join(this.children.length && this.children.every(node => node.tagName === 'P') ? '\n\n' : '');
+    }
+    replaceChildren(...children) {editorActions.domReplacements++; super.replaceChildren(...children);}
+    dispatchEvent(event) {
+      editorEvents.push(event.type);
+      if (event.type === 'paste') {
+        editorActions.pastes.push(event);
+        onPaste?.(event, this, selection);
+      }
+      return !event.defaultPrevented;
+    }
+  }
+  class TestEvent {
+    constructor(type, options = {}) {this.type = type; this.defaultPrevented = false; Object.assign(this, options);}
+    preventDefault() {if (this.cancelable) this.defaultPrevented = true;}
+  }
+  class TestDataTransfer {
+    constructor() {if (clipboardConstructionThrows) throw new Error('Clipboard construction unavailable'); this.data = new Map();}
+    setData(type, value) {this.data.set(type, value);}
+    getData(type) {return this.data.get(type) || '';}
+    get types() {return [...this.data.keys()];}
   }
   class Panel extends Element {
     constructor() {
@@ -60,19 +92,29 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0} = {}) {
     querySelectorAll(selector) {return selector === '.bcr-generate, textarea, select, input' ? [this.controls['.bcr-generate'], this.controls['.bcr-instruction'], this.controls['.bcr-references'], this.controls['.bcr-mode'], this.controls['.bcr-include-project']] : [];}
     remove() {this.isConnected = false; if (root === this) root = null;}
   }
-  const editor = new Textarea();
+  const editor = editorType === 'contenteditable' ? new Editable() : new Textarea();
   editor.parentElement = {insertBefore(panel) {root = panel; panel.isConnected = true;}};
   const document = {
     documentElement: {}, getElementById: () => root,
-    querySelectorAll: selector => selector === 'textarea[name="content"]' ? [editor] : [],
-    createElement: tag => tag === 'section' ? new Panel() : new Element(tag)
+    querySelectorAll: selector => selector === (editorType === 'contenteditable' ? '[contenteditable="true"][role="textbox"]' : 'textarea[name="content"]') ? [editor] : [],
+    createElement: tag => tag === 'section' ? new Panel() : new Element(tag),
+    createTextNode: text => ({nodeType: 3, textContent: text, children: []}),
+    createRange: () => ({selectNodeContents(target) {this.target = target;}}),
+    execCommand(command, showUI, value) {
+      editorActions.execs.push({command, showUI, value});
+      if (execResult === 'throw') throw new Error('insertText is unavailable');
+      if (execResult) editor.children = [this.createTextNode(execTransform(value))];
+      return execResult;
+    }
   };
-  const window = {addEventListener() {}};
+  const window = {addEventListener() {}, getSelection: () => selection};
   window.top = window;
   const context = vm.createContext({
     window, document, location, URL, HTMLTextAreaElement: Textarea, HTMLInputElement: Textarea,
     Date: {now: () => wallNow}, performance: {now: () => now}, crypto: {randomUUID: () => `test-request-${++requestNumber}`},
-    Event: class {constructor(type) {this.type = type;}}, confirm: () => {now += confirmDelayMs; wallNow += confirmDelayMs; return confirmOverwrite;},
+    Event: TestEvent, InputEvent: TestEvent,
+    DataTransfer: clipboardSupport ? TestDataTransfer : undefined, ClipboardEvent: clipboardSupport ? TestEvent : undefined,
+    confirm: () => {now += confirmDelayMs; wallNow += confirmDelayMs; return confirmOverwrite;},
     MutationObserver: class {constructor(callback) {mutationCallback = callback;} observe() {}}, setInterval(callback) {intervals.push(callback);},
     chrome: {runtime: {id: 'test-extension', onMessage: {addListener(callback) {progressListener = callback;}}, sendMessage: async message => {
       messages.push(message);
@@ -83,7 +125,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0} = {}) {
   });
   vm.runInContext(source, context);
   return {
-    root: () => root, editor, editorEvents, messages, generations, location,
+    root: () => root, editor, editorEvents, editorActions, messages, generations, location,
     control: selector => root.querySelector(selector), mutate: () => mutationCallback(),
     type(selector, value) {const control = root.querySelector(selector); control.value = value; control.trigger(selector === '.bcr-mode' ? 'change' : 'input');},
     includeProject(checked) {const control = root.querySelector('.bcr-include-project'); control.checked = checked; control.trigger('change');},
@@ -140,6 +182,106 @@ test('normal mode is the default and instruction is separate from references in 
   app.finish(); await pending;
   assert.equal(app.editor.value, '修正しました。\n\nご確認ください。');
   assert.deepEqual(app.editorEvents, ['input', 'change']);
+});
+
+async function insertDraft(app, text) {
+  await flush();
+  app.type('.bcr-instruction', '確認した内容を返信する');
+  const pending = app.submit();
+  await flush();
+  app.finish({text});
+  await pending;
+}
+
+test('controlled rich editors receive plain-text paste with paragraphs, quotes and line breaks', async () => {
+  const text = '@担当者 様\n\nお世話になっております。\nご連絡が遅くなり申し訳ございません。\n\n> 進捗はいかがでしょうか。\n> 反映時期を教えてください。\n\n現在、確認しております。\nよろしくお願いいたします。';
+  let model;
+  const app = harness({editorType: 'contenteditable', onPaste(event, editor, selection) {
+    assert.equal(event.bubbles, true);
+    assert.equal(event.cancelable, true);
+    assert.equal(event.composed, true);
+    assert.equal(selection.ranges.length, 1);
+    assert.equal(selection.ranges[0].target, editor);
+    assert.deepEqual(event.clipboardData.types, ['text/plain']);
+    assert.equal(event.clipboardData.getData('text/html'), '');
+    event.preventDefault();
+    model = event.clipboardData.getData('text/plain').split('\n\n').map(paragraph => paragraph.split('\n'));
+    // A framework renders its own model; the extension must leave that model
+    // and DOM alone instead of replacing its paragraphs with flat text nodes.
+    editor.children = model.map(lines => ({tagName: 'P', textContent: lines.join('\n'), children: []}));
+  }});
+  await insertDraft(app, text.replace(/\n/g, '\r\n'));
+  assert.equal(model.map(lines => lines.join('\n')).join('\n\n'), text);
+  assert.equal(app.editor.innerText, text);
+  assert.deepEqual(app.editorEvents, ['paste']);
+  assert.equal(app.editorActions.execs.length, 0);
+  assert.equal(app.editorActions.domReplacements, 0);
+});
+
+test('a consumed paste may render asynchronously without the extension overwriting the editor', async () => {
+  const text = '@担当者 様\n\nご確認ありがとうございます。\n\n対応を進めます。';
+  let renderPaste;
+  const app = harness({editorType: 'contenteditable', onPaste(event, editor) {
+    event.preventDefault();
+    const plainText = event.clipboardData.getData('text/plain');
+    renderPaste = () => {editor.children = plainText.split('\n\n').map(paragraph => ({tagName: 'P', textContent: paragraph, children: []}));};
+  }});
+  await insertDraft(app, text);
+  assert.equal(app.editor.innerText, '');
+  assert.equal(app.editorActions.execs.length, 0);
+  assert.equal(app.editorActions.domReplacements, 0);
+  renderPaste();
+  assert.equal(app.editor.innerText, text);
+});
+
+test('unhandled paste falls back to native insertText when it preserves all line breaks', async () => {
+  const text = '宛名\n\n本文\n> 引用\n\n回答';
+  const app = harness({editorType: 'contenteditable', execResult: true});
+  await insertDraft(app, text);
+  assert.equal(app.editor.innerText, text);
+  assert.equal(app.editorActions.pastes.length, 1);
+  assert.deepEqual(app.editorActions.execs, [{command: 'insertText', showUI: false, value: text}]);
+  assert.equal(app.editorActions.domReplacements, 0);
+});
+
+test('unavailable paste constructors and failed insertText retain safe DOM fallback with exact line breaks', async () => {
+  const text = '@担当者 様\n\n> 引用1\n> 引用2\n\n本文 <script>alert("x")</script>\n\n- 項目1\n- 項目2';
+  for (const fallback of [{clipboardSupport: false, execResult: false},
+    {clipboardConstructionThrows: true, execResult: 'throw'}, {execResult: false},
+    {execResult: true, execTransform: value => value.replace(/\n/g, ' ')}]) {
+    const app = harness({editorType: 'contenteditable', ...fallback});
+    await insertDraft(app, text.replace(/\n/g, '\r\n'));
+    assert.equal(app.editor.innerText, text);
+    assert.equal(app.editorActions.domReplacements, 1);
+    assert.equal(app.editorActions.execs.length, 1);
+    assert.equal(app.editor.children.filter(node => node.tagName === 'BR').length, text.split('\n').length - 1);
+    assert.ok(app.editor.children.every(node => node.nodeType === 3 || node.tagName === 'BR'));
+    assert.equal(descendants(app.editor, 'script').length, 0);
+    assert.equal(app.editorEvents.at(-1), 'input');
+  }
+});
+
+test('HTML-like draft text is sent only as plain text and never interpreted as paste markup', async () => {
+  const text = '<img src=x onerror=alert(1)>\n\n> <script>literal</script>';
+  let pasted;
+  const app = harness({editorType: 'contenteditable', onPaste(event) {
+    event.preventDefault();
+    pasted = event.clipboardData;
+  }});
+  await insertDraft(app, text);
+  assert.deepEqual(pasted.types, ['text/plain']);
+  assert.equal(pasted.getData('text/plain'), text);
+  assert.equal(pasted.getData('text/html'), '');
+  assert.equal(app.editorActions.execs.length + app.editorActions.domReplacements, 0);
+});
+
+test('textarea insertion keeps existing paragraph, quote and literal escape text without clipboard events', async () => {
+  const text = '@担当者 様\r\n\r\n> 確認事項\r> 続き\r\n\r\n回答です。 C:\\new-folder\\note.txt\r\n\r\nよろしくお願いいたします。';
+  const app = harness({clipboardConstructionThrows: true});
+  await insertDraft(app, text);
+  assert.equal(app.editor.value, text.replace(/\r\n?/g, '\n'));
+  assert.deepEqual(app.editorEvents, ['input', 'change']);
+  assert.equal(app.editorActions.pastes.length + app.editorActions.execs.length + app.editorActions.domReplacements, 0);
 });
 
 test('mode, instruction and references have visible labels and associated help text', async () => {
