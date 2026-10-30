@@ -3,10 +3,30 @@
   const ISSUE_PATH = /^\/view\/([A-Z0-9_]+-\d+)\/?$/i;
   const BACKLOG_HOST = /^[a-z0-9-]+\.(?:backlog\.com|backlog\.jp|backlogtool\.com)$/i;
   if (location.protocol !== 'https:' || location.port || !BACKLOG_HOST.test(location.hostname)) return;
+  const previousRoot = document.getElementById('bcr-root');
+  const restored = previousRoot ? {
+    instruction: previousRoot.querySelector('.bcr-instruction')?.value || '',
+    references: previousRoot.querySelector('.bcr-references')?.value || '',
+    mode: previousRoot.querySelector('.bcr-mode')?.value === 'agent' ? 'agent' : 'chat',
+    includeCurrentProject: previousRoot.querySelector('.bcr-include-project')?.checked !== false,
+    collapsed: previousRoot.classList.contains('bcr-collapsed')
+  } : null;
+  // A recovery injection replaces only this extension's UI/listeners. Preserve
+  // unfinished instructions and leave Backlog's comment draft untouched.
+  document.dispatchEvent(new Event('backlog-ai-dispose'));
+  previousRoot?.remove();
+  let disposed = false;
+  let panelLayout = null;
+  let mountedEditor = null;
+  let observer;
+  const intervals = [];
+  let settingsPending = null;
+  let connectionFailed = false;
+  let lastReconnectAt = -Infinity;
   let lastPath = location.pathname;
   let navigationVersion = 0;
   let task = null;
-  let panelCollapsed = true;
+  let panelCollapsed = restored ? restored.collapsed : true;
   let provider = 'copilot';
   let uiStatus = {path: lastPath, text: '', kind: ''};
   // Keep drafts only in this page's memory, including when Backlog remounts its editor.
@@ -32,6 +52,7 @@
     if (!drafts.has(path)) drafts.set(path, {instruction: '', mode: 'chat', references: '', includeCurrentProject: true, sources: [], sourcesOpen: false, progress: [], elapsedMs: 0, toolCalls: null, resultMode: 'chat'});
     return drafts.get(path);
   }
+  if (restored) Object.assign(getDraft(lastPath), restored);
   function saveDraft(root, path) {
     const draft = getDraft(path);
     draft.instruction = root.querySelector('.bcr-instruction').value;
@@ -179,6 +200,7 @@
     editor.focus();
   }
   function renderState() {
+    if (disposed) return;
     const root = document.getElementById('bcr-root');
     if (!root) return;
     root.querySelector('.bcr-provider').textContent = providerLabel(provider);
@@ -197,7 +219,7 @@
       status.textContent = ''; status.className = 'bcr-status';
     }
     // Keep the toggle usable while generating, without unmounting form fields.
-    root.className = panelCollapsed ? 'bcr-collapsed' : '';
+    root.classList.toggle('bcr-collapsed', panelCollapsed);
     root.querySelector('.bcr-body').hidden = panelCollapsed;
     root.querySelector('.bcr-heading').hidden = panelCollapsed;
     const toggle = root.querySelector('.bcr-toggle');
@@ -209,6 +231,7 @@
     toggle.title = panelCollapsed && status.textContent ? status.textContent : panelCollapsed ? 'AI返信アシスタントを開く' : 'AI返信アシスタントを折りたたむ';
     const compactNotice = root.querySelector('.bcr-compact-status');
     if (compactNotice.textContent !== (panelCollapsed ? compactStatus : '')) compactNotice.textContent = panelCollapsed ? compactStatus : '';
+    panelLayout?.update();
   }
   function setStatus(path, text, kind = '', terminal = false) {
     uiStatus = {path, text, kind};
@@ -226,7 +249,12 @@
     }
     renderState();
   }
-  chrome.runtime.onMessage.addListener((message, sender) => {
+  const onMessage = (message, sender, sendResponse) => {
+    if (disposed) return;
+    if (message?.type === 'BACKLOG_AI_PING' && chrome.runtime.id && sender.id === chrome.runtime.id) {
+      sendResponse({ok: true, version: 1});
+      return;
+    }
     if (sender.id !== chrome.runtime.id || message?.type !== 'GENERATION_PROGRESS' || !task
       || task.finishedElapsedMs !== null || task.responseReceived
       || message.requestId !== task.requestId || message.issueKey !== task.issueKey
@@ -235,13 +263,47 @@
       || typeof message.message !== 'string' || !message.message || message.message.length > 300) return;
     task.progressSequence = message.sequence;
     setStatus(task.path, message.message);
-  });
+  };
+  chrome.runtime.onMessage.addListener(onMessage);
+  const isConnectionError = error => /Receiving end does not exist|Could not establish connection|Extension context invalidated|message port closed|message channel closed/i.test(error?.message || String(error));
+  const connectionMessage = error => isConnectionError(error)
+    ? '拡張機能との接続を確認できませんでした。タブを開き直しても続く場合は、このページを再読み込みしてください。'
+    : error.message || String(error);
   async function refreshSettings() {
-    const result = await chrome.runtime.sendMessage({type: 'GET_SETTINGS'});
-    if (!result?.ok) throw new Error(result?.error || '拡張機能の設定を読み込めませんでした。');
-    provider = result.provider;
-    renderState();
-    return result;
+    if (settingsPending) return settingsPending;
+    const operation = (async () => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const result = await chrome.runtime.sendMessage({type: 'GET_SETTINGS'});
+          if (!result?.ok) throw new Error(result?.error || '拡張機能の設定を読み込めませんでした。');
+          if (disposed) return result;
+          provider = result.provider;
+          if (connectionFailed && !task) uiStatus = {path: location.pathname, text: '', kind: ''};
+          connectionFailed = false;
+          renderState();
+          return result;
+        } catch (error) {
+          if (disposed) throw error;
+          connectionFailed = isConnectionError(error);
+          if (!connectionFailed || attempt >= 2 || /Extension context invalidated/i.test(error.message)) throw new Error(connectionMessage(error));
+          // Only idempotent settings reads retry. Never repeat AI generation.
+          await new Promise(resolve => setTimeout(resolve, attempt ? 500 : 150));
+        }
+      }
+    })();
+    settingsPending = operation;
+    try {return await operation;} finally {if (settingsPending === operation) settingsPending = null;}
+  }
+  function reconnectOnReturn() {
+    if (disposed || task || document.visibilityState === 'hidden' || performance.now() - lastReconnectAt < 15000) return;
+    lastReconnectAt = performance.now();
+    void refreshSettings().catch(error => {if (!disposed && !task) setStatus(location.pathname, error.message, 'error');});
+  }
+  function removePanel() {
+    panelLayout?.destroy();
+    panelLayout = null;
+    mountedEditor = null;
+    document.getElementById('bcr-root')?.remove();
   }
   function checkNavigation() {
     if (location.pathname !== lastPath) {
@@ -249,15 +311,28 @@
       if (previousRoot) saveDraft(previousRoot, lastPath);
       lastPath = location.pathname;
       navigationVersion++;
-      document.getElementById('bcr-root')?.remove();
+      removePanel();
       if (task) uiStatus = {path: task.path, text: '生成中に課題が切り替わったため、生成文は挿入しません。', kind: 'error'};
     }
   }
   function mount() {
+    if (disposed) return;
     checkNavigation();
-    if (!issueKey()) {document.getElementById('bcr-root')?.remove(); return;}
+    if (!issueKey()) {removePanel(); return;}
     const editor = findEditor();
-    if (!editor || document.getElementById('bcr-root')) return;
+    if (!editor) {removePanel(); return;}
+    const existingRoot = document.getElementById('bcr-root');
+    if (existingRoot) {
+      if (mountedEditor !== editor) {
+        panelLayout?.destroy();
+        editor.parentElement?.insertBefore(existingRoot, editor);
+        panelLayout = BacklogPanelLayout.attach(existingRoot, editor);
+        mountedEditor = editor;
+      }
+      panelLayout?.update();
+      return;
+    }
+    panelLayout?.destroy();
     const root = document.createElement('section');
     root.id = 'bcr-root';
     root.className = 'bcr-collapsed';
@@ -296,6 +371,8 @@
       <details class="bcr-sources" aria-label="直近の生成で参照した情報" hidden></details>
       </div>`;
     editor.parentElement?.insertBefore(root, editor);
+    panelLayout = BacklogPanelLayout.attach(root, editor);
+    mountedEditor = editor;
     const mountedPath = location.pathname;
     const draft = getDraft(mountedPath);
     root.querySelector('.bcr-instruction').value = draft.instruction;
@@ -330,12 +407,14 @@
       setStatus(currentTask.path, '設定を確認しています…');
       try {
         const settings = await refreshSettings();
+        if (disposed) return;
         checkNavigation();
         if (currentTask.version !== navigationVersion) throw new Error('課題が切り替わりました。もう一度生成してください。');
         setStatus(currentTask.path, currentTask.mode === 'agent'
           ? `${providerLabel(settings.provider)}に調査・生成処理を依頼しています…`
           : `${providerLabel(settings.provider)}に生成処理を依頼しています…`);
         const result = await chrome.runtime.sendMessage({type: 'GENERATE_REPLY', instruction, issueKey: currentTask.issueKey, provider: settings.provider, mode: currentTask.mode, references: currentTask.references, includeCurrentProject: currentTask.includeCurrentProject, requestId: currentTask.requestId});
+        if (disposed) return;
         currentTask.responseReceived = true;
         if (!result?.ok) throw new Error(result?.error || '生成に失敗しました。');
         checkNavigation();
@@ -356,7 +435,8 @@
         setEditorValue(target, result.text);
         setStatus(currentTask.path, `${providerLabel(result.provider)}の生成文を挿入しました（参照コメント ${result.commentsUsed} 件）。確認して手動で投稿してください。`, 'ok', true);
       } catch (error) {
-        setStatus(currentTask.path, error.message || String(error), 'error', true);
+        if (isConnectionError(error)) connectionFailed = true;
+        if (!disposed) setStatus(currentTask.path, connectionMessage(error), 'error', true);
       } finally {
         draft.elapsedMs = taskElapsed(currentTask);
         task = null;
@@ -364,10 +444,22 @@
       }
     });
   }
-  const observer = new MutationObserver(() => {checkNavigation(); if (issueKey() && !document.getElementById('bcr-root')) mount();});
+  observer = new MutationObserver(() => {if (disposed) return; checkNavigation(); if (issueKey() && !document.getElementById('bcr-root')) mount();});
   observer.observe(document.documentElement, {childList: true, subtree: true});
   window.addEventListener('popstate', mount);
+  window.addEventListener('focus', reconnectOnReturn);
+  document.addEventListener('visibilitychange', reconnectOnReturn);
+  document.addEventListener('backlog-ai-dispose', function dispose() {
+    disposed = true;
+    observer.disconnect();
+    intervals.forEach(clearInterval);
+    window.removeEventListener('popstate', mount);
+    window.removeEventListener('focus', reconnectOnReturn);
+    document.removeEventListener('visibilitychange', reconnectOnReturn);
+    try {chrome.runtime.onMessage.removeListener(onMessage);} catch { /* Context may already be invalidated. */ }
+    removePanel();
+  }, {once: true});
   mount();
-  setInterval(mount, 1000);
-  setInterval(() => {if (task) renderElapsed();}, 100);
+  intervals.push(setInterval(mount, 1000));
+  intervals.push(setInterval(() => {if (!disposed && task) renderElapsed();}, 100));
 })();

@@ -27,3 +27,8 @@
 #bcr-root.bcr-collapsed .bcr-toggle:is(:hover,:focus){opacity:1}
 @media(prefers-reduced-motion:reduce){#bcr-root .bcr-toggle{transition:none}}
 @media(forced-colors:active){#bcr-root.bcr-collapsed .bcr-toggle{opacity:1}}
+
+/* A fixed Backlog composer must not grow over the whole comment history. */
+#bcr-root.bcr-docked:not(.bcr-collapsed){max-height:45vh;max-height:45dvh;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+#bcr-root.bcr-docked:not(.bcr-collapsed) .bcr-header{position:sticky;top:-14px;background:#f7f9fc;z-index:1;padding:8px 0}
+.bcr-comment-clearance{display:block;box-sizing:border-box;flex:none;clear:both;width:100%;height:0;pointer-events:none}

@@ -7,14 +7,19 @@ const source = await readFile(new URL('../content.js', import.meta.url), 'utf8')
 const flush = async () => {for (let i = 0; i < 40; i++) await Promise.resolve();};
 
 function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'textarea', onPaste,
-  clipboardSupport = true, clipboardConstructionThrows = false, execResult = false, execTransform = value => value} = {}) {
+  clipboardSupport = true, clipboardConstructionThrows = false, execResult = false, execTransform = value => value,
+  getSettings = () => ({ok: true, provider: 'copilot'})} = {}) {
   let root = null;
   let mutationCallback;
   let progressListener;
   let now = 1000;
   let wallNow = 1000;
   let requestNumber = 0;
-  const intervals = [];
+  const intervals = new Map();
+  let nextInterval = 0;
+  const documentListeners = new Map();
+  const windowListeners = new Map();
+  const layoutActions = {attached: 0, destroyed: 0, updated: 0};
   const messages = [];
   const generations = [];
   const editorEvents = [];
@@ -22,7 +27,12 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
   const selection = {ranges: [], removeAllRanges() {this.ranges = [];}, addRange(range) {this.ranges.push(range);}};
   const location = {protocol: 'https:', port: '', hostname: 'example.backlog.com', origin: 'https://example.backlog.com', pathname: '/view/TEST-12'};
   class Element {
-    constructor(tag) {this.tagName = tag.toUpperCase(); this.children = []; this.textContent = ''; this.value = ''; this.disabled = false; this.hidden = false; this.open = false; this.isConnected = false; this.listeners = new Map();}
+    constructor(tag) {
+      this.tagName = tag.toUpperCase(); this.children = []; this.textContent = ''; this.value = ''; this.disabled = false; this.hidden = false; this.open = false; this.isConnected = false; this.listeners = new Map();
+      this.className = '';
+      this.classList = {contains: name => this.className.split(' ').includes(name),
+        toggle: (name, add) => {const names = new Set(this.className.split(' ').filter(Boolean)); if (add) names.add(name); else names.delete(name); this.className = [...names].join(' ');}};
+    }
     appendChild(child) {this.children.push(child); child.parentElement = this; return child;}
     replaceChildren(...children) {this.children = children;}
     addEventListener(name, callback) {this.listeners.set(name, callback);}
@@ -95,6 +105,10 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
   const editor = editorType === 'contenteditable' ? new Editable() : new Textarea();
   editor.parentElement = {insertBefore(panel) {root = panel; panel.isConnected = true;}};
   const document = {
+    visibilityState: 'visible',
+    addEventListener(name, callback, options) {documentListeners.set(name, {callback, once: options?.once});},
+    removeEventListener(name) {documentListeners.delete(name);},
+    dispatchEvent(event) {const entry = documentListeners.get(event.type); if (entry?.once) documentListeners.delete(event.type); entry?.callback(event);},
     documentElement: {}, getElementById: () => root,
     querySelectorAll: selector => selector === (editorType === 'contenteditable' ? '[contenteditable="true"][role="textbox"]' : 'textarea[name="content"]') ? [editor] : [],
     createElement: tag => tag === 'section' ? new Panel() : new Element(tag),
@@ -107,25 +121,32 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
       return execResult;
     }
   };
-  const window = {addEventListener() {}, getSelection: () => selection};
+  const window = {addEventListener(name, callback) {windowListeners.set(name, callback);}, removeEventListener(name) {windowListeners.delete(name);}, getSelection: () => selection};
   window.top = window;
   const context = vm.createContext({
     window, document, location, URL, HTMLTextAreaElement: Textarea, HTMLInputElement: Textarea,
+    BacklogPanelLayout: {attach() {layoutActions.attached++; return {update() {layoutActions.updated++;}, destroy() {layoutActions.destroyed++;}};}},
     Date: {now: () => wallNow}, performance: {now: () => now}, crypto: {randomUUID: () => `test-request-${++requestNumber}`},
     Event: TestEvent, InputEvent: TestEvent,
     DataTransfer: clipboardSupport ? TestDataTransfer : undefined, ClipboardEvent: clipboardSupport ? TestEvent : undefined,
     confirm: () => {now += confirmDelayMs; wallNow += confirmDelayMs; return confirmOverwrite;},
-    MutationObserver: class {constructor(callback) {mutationCallback = callback;} observe() {}}, setInterval(callback) {intervals.push(callback);},
-    chrome: {runtime: {id: 'test-extension', onMessage: {addListener(callback) {progressListener = callback;}}, sendMessage: async message => {
+    MutationObserver: class {constructor(callback) {mutationCallback = callback;} observe() {} disconnect() {}},
+    setInterval(callback) {const id = ++nextInterval; intervals.set(id, callback); return id;}, clearInterval(id) {intervals.delete(id);},
+    setTimeout(callback) {void Promise.resolve().then(callback);},
+    chrome: {runtime: {id: 'test-extension', onMessage: {addListener(callback) {progressListener = callback;}, removeListener(callback) {if (progressListener === callback) progressListener = null;}}, sendMessage: async message => {
       messages.push(message);
-      if (message.type === 'GET_SETTINGS') return {ok: true, provider: 'copilot'};
+      if (message.type === 'GET_SETTINGS') return getSettings();
       if (message.type !== 'GENERATE_REPLY') throw new Error('Unexpected message');
       return new Promise(resolve => generations.push({message, resolve}));
     }}}
   });
   vm.runInContext(source, context);
   return {
-    root: () => root, editor, editorEvents, editorActions, messages, generations, location,
+    root: () => root, editor, editorEvents, editorActions, messages, generations, location, layoutActions, intervals,
+    focus: () => windowListeners.get('focus')?.(),
+    visibility(state) {document.visibilityState = state; document.dispatchEvent(new TestEvent('visibilitychange'));},
+    reinject() {vm.runInContext(source, context);},
+    ping() {let response; progressListener({type: 'BACKLOG_AI_PING'}, {id: 'test-extension'}, result => {response = result;}); return response;},
     control: selector => root.querySelector(selector), mutate: () => mutationCallback(),
     type(selector, value) {const control = root.querySelector(selector); control.value = value; control.trigger(selector === '.bcr-mode' ? 'change' : 'input');},
     includeProject(checked) {const control = root.querySelector('.bcr-include-project'); control.checked = checked; control.trigger('change');},
@@ -182,6 +203,91 @@ test('normal mode is the default and instruction is separate from references in 
   app.finish(); await pending;
   assert.equal(app.editor.value, '修正しました。\n\nご確認ください。');
   assert.deepEqual(app.editorEvents, ['input', 'change']);
+});
+
+test('returning to a long-idle tab checks settings once and never generates automatically', async () => {
+  const app = harness();
+  await flush();
+  const initial = app.messages.length;
+  app.visibility('hidden');
+  await flush();
+  assert.equal(app.messages.length, initial);
+  app.visibility('visible');
+  app.focus();
+  await flush();
+  assert.equal(app.messages.length, initial + 1);
+  assert.equal(app.generations.length, 0);
+  app.advance(15000);
+  app.focus();
+  await flush();
+  assert.equal(app.messages.length, initial + 2);
+  assert.deepEqual({...app.ping()}, {ok: true, version: 1});
+});
+
+test('settings reconnect retries transient missing receivers without showing a stale error', async () => {
+  let attempts = 0;
+  const app = harness({getSettings: () => {
+    if (++attempts < 3) throw new Error('Could not establish connection. Receiving end does not exist.');
+    return {ok: true, provider: 'copilot'};
+  }});
+  await flush();
+  assert.equal(attempts, 3);
+  assert.equal(app.control('.bcr-status').textContent, '');
+  assert.equal(app.generations.length, 0);
+});
+
+test('a failed reconnect is clear in Japanese and is cleared after the tab reconnects', async () => {
+  let available = false;
+  const app = harness({getSettings: () => {
+    if (!available) throw new Error('Could not establish connection. Receiving end does not exist.');
+    return {ok: true, provider: 'copilot'};
+  }});
+  await flush();
+  assert.match(app.control('.bcr-status').textContent, /拡張機能との接続/);
+  assert.doesNotMatch(app.control('.bcr-status').textContent, /Receiving end/);
+  available = true;
+  app.focus();
+  await flush();
+  assert.equal(app.control('.bcr-status').textContent, '');
+});
+
+test('recovery injection keeps unfinished fields, replaces listeners and never changes a comment draft', async () => {
+  const app = harness();
+  await flush();
+  app.toggle();
+  app.type('.bcr-instruction', '調査結果を伝える');
+  app.type('.bcr-references', 'OTHER-1');
+  app.type('.bcr-mode', 'agent');
+  app.includeProject(false);
+  app.editor.value = '投稿前の下書き';
+  const previousRoot = app.root();
+  app.reinject();
+  await flush();
+  assert.notEqual(app.root(), previousRoot);
+  assert.equal(app.control('.bcr-instruction').value, '調査結果を伝える');
+  assert.equal(app.control('.bcr-references').value, 'OTHER-1');
+  assert.equal(app.control('.bcr-mode').value, 'agent');
+  assert.equal(app.control('.bcr-include-project').checked, false);
+  assert.equal(app.control('.bcr-body').hidden, false);
+  assert.equal(app.editor.value, '投稿前の下書き');
+  assert.equal(app.intervals.size, 2);
+  assert.equal(app.layoutActions.destroyed, 1);
+  assert.equal(app.generations.length, 0);
+});
+
+test('recovery never inserts a late result or automatically repeats a generation', async () => {
+  const app = harness();
+  await flush();
+  app.type('.bcr-instruction', '返信を作成');
+  const pending = app.submit();
+  await flush();
+  app.reinject();
+  await flush();
+  app.finish();
+  await pending;
+  assert.equal(app.editor.value, '');
+  assert.equal(app.generations.length, 1);
+  assert.equal(app.control('.bcr-instruction').value, '返信を作成');
 });
 
 async function insertDraft(app, text) {

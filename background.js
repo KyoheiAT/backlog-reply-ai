@@ -1,4 +1,6 @@
-importScripts('prompt-defaults.js', 'prompt-manager.js', 'backlog-formatting.js');
+importScripts('prompt-defaults.js', 'prompt-manager.js', 'backlog-formatting.js', 'tab-recovery.js');
+
+BacklogTabRecovery.install(chrome);
 
 const NATIVE_HOST = 'com.backlog_ai.reply';
 let activeGenerations = 0;

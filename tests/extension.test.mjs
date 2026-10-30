@@ -8,6 +8,7 @@ const backgroundSource = await readFile(new URL('../background.js', import.meta.
 const promptManagerSource = await readFile(new URL('../prompt-manager.js', import.meta.url), 'utf8');
 const promptDefaultsSource = await readFile(new URL('../prompt-defaults.js', import.meta.url), 'utf8');
 const formattingSource = await readFile(new URL('../backlog-formatting.js', import.meta.url), 'utf8');
+const recoverySource = await readFile(new URL('../tab-recovery.js', import.meta.url), 'utf8');
 const defaultsContext = vm.createContext({});
 vm.runInContext(promptDefaultsSource, defaultsContext);
 const defaultFixedPrompt = defaultsContext.BacklogPromptDefaults.fixedPrompt;
@@ -81,7 +82,7 @@ function background({settings = {}, fetch: handleFetch, native: handleNative, co
     crypto: {subtle: {digest: async (_, bytes) => createHash('sha256').update(bytes).digest()}},
     importScripts(...files) {
       for (const file of files) {
-        const scripts = {'prompt-defaults.js': promptDefaultsSource, 'prompt-manager.js': promptManagerSource, 'backlog-formatting.js': formattingSource};
+        const scripts = {'prompt-defaults.js': promptDefaultsSource, 'prompt-manager.js': promptManagerSource, 'backlog-formatting.js': formattingSource, 'tab-recovery.js': recoverySource};
         assert.ok(Object.hasOwn(scripts, file));
         vm.runInContext(scripts[file], context);
       }
@@ -224,7 +225,8 @@ test('agent scope accepts current and referenced project keys starting with a di
 
 test('native messaging permissions exclude localhost, unrelated websites and Anthropic', () => {
   assert.equal(manifest.version, '0.4.0');
-  assert.deepEqual(manifest.permissions, ['storage', 'nativeMessaging']);
+  assert.deepEqual(manifest.permissions, ['storage', 'nativeMessaging', 'scripting']);
+  assert.deepEqual(manifest.content_scripts[0].js, ['panel-layout.js', 'content.js']);
   assert.ok(!manifest.host_permissions.some(value => value === 'https://*/*' || value.includes('anthropic') || value.includes('127.0.0.1') || value.includes('localhost')));
 });
 
