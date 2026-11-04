@@ -88,6 +88,37 @@ test('initial display loads only selected provider, preserving auto/default whil
   assert.equal(app.saves[0].codexModel, '');
 });
 
+test('prompt-test exclusion is opt-in and only a stored boolean true enables it', async () => {
+  assert.match(markup, /<label[^>]*for="excludeLatestOwnComment"/);
+  assert.match(markup, /<input id="excludeLatestOwnComment" type="checkbox" aria-describedby="excludeLatestOwnCommentNote">/);
+  for (const value of [undefined, false, 'true', 1, null]) {
+    const app = optionsHarness({excludeLatestOwnComment: value});
+    await flush();
+    assert.equal(app.element('excludeLatestOwnComment').checked, false);
+    await app.save();
+    assert.equal(app.saves.at(-1).excludeLatestOwnComment, false);
+  }
+  const enabled = optionsHarness({excludeLatestOwnComment: true});
+  await flush();
+  assert.equal(enabled.element('excludeLatestOwnComment').checked, true);
+});
+
+test('prompt-test checkbox persists explicit opt-in and can be disabled again', async () => {
+  const app = optionsHarness();
+  await flush();
+  app.element('excludeLatestOwnComment').checked = true;
+  await app.save();
+  assert.equal(app.data.excludeLatestOwnComment, true);
+  assert.equal(app.saves.at(-1).excludeLatestOwnComment, true);
+  const reopened = optionsHarness(app.data);
+  await flush();
+  assert.equal(reopened.element('excludeLatestOwnComment').checked, true);
+  reopened.element('excludeLatestOwnComment').checked = false;
+  await reopened.save();
+  assert.equal(reopened.data.excludeLatestOwnComment, false);
+  assert.equal(reopened.saves.at(-1).excludeLatestOwnComment, false);
+});
+
 test('saved model IDs remain selected when absent from the current list and survive saving', async () => {
   const app = optionsHarness({copilotModel: 'previous-model', codexModel: 'saved-codex'});
   await flush();

@@ -8,6 +8,7 @@
   let baseline = null;
   let editingRevision = 0;
   let savedProfile = null;
+  let defaultGeneratedPrompt = null;
   let defaultFixedPrompt = null;
   let editVersion = 0;
   let readVersion = 0;
@@ -32,6 +33,7 @@
   }
   function renderControls() {
     element('promptSave').disabled = !loaded || saving;
+    element('promptResetGenerated').disabled = !loaded || saving || defaultGeneratedPrompt === null;
     element('promptResetFixed').disabled = !loaded || saving || defaultFixedPrompt === null;
     element('promptReload').disabled = saving;
     element('promptRegenerate').disabled = !loaded || saving || regenerating || fields.locked.checked || savedProfile?.status?.state === 'running';
@@ -77,7 +79,9 @@
   }
   function renderSaved(result) {
     savedProfile = result.profile;
-    defaultFixedPrompt = typeof result.defaultFixedPrompt === 'string' && result.defaultFixedPrompt.trim()
+    defaultGeneratedPrompt = typeof result.defaultGeneratedPrompt === 'string' && result.defaultGeneratedPrompt.trim()
+      && result.defaultGeneratedPrompt.length <= 12000 && !result.defaultGeneratedPrompt.includes('\u0000') ? result.defaultGeneratedPrompt : null;
+    defaultFixedPrompt = typeof result.defaultFixedPrompt === 'string'
       && result.defaultFixedPrompt.length <= 10000 && !result.defaultFixedPrompt.includes('\u0000') ? result.defaultFixedPrompt : null;
     const profile = savedProfile;
     const stateLabels = {idle: '未生成', running: '生成中', success: '生成完了', error: '生成できませんでした', skipped: '生成をスキップ'};
@@ -163,13 +167,21 @@
   for (const field of Object.values(fields)) {
     field.addEventListener(field === fields.locked ? 'change' : 'input', () => {editVersion++; renderControls();});
   }
+  element('promptResetGenerated').addEventListener('click', () => {
+    if (element('promptResetGenerated').disabled) return;
+    const version = ++actionVersion;
+    fields.generatedPrompt.value = defaultGeneratedPrompt;
+    editVersion++;
+    renderControls();
+    feedback('「生成プロンプト」をGPTの指示に基づく標準の編集方針に戻しました。「プロンプト設定を保存」で適用してください。', false, version);
+  });
   element('promptResetFixed').addEventListener('click', () => {
     if (element('promptResetFixed').disabled) return;
     const version = ++actionVersion;
     fields.fixedPrompt.value = defaultFixedPrompt;
     editVersion++;
     renderControls();
-    feedback('「常に追加する指示」を標準プロンプトに戻しました。「プロンプト設定を保存」で適用してください。', false, version);
+    feedback('「常に追加する指示」を初期値に戻しました（標準は空欄です）。「プロンプト設定を保存」で適用してください。', false, version);
   });
   element('promptForm').addEventListener('submit', async event => {
     event.preventDefault();
@@ -186,7 +198,7 @@
       if (isDirty()) await save(version);
       if (isDirty()) throw new Error('保存中に入力が変更されました。変更を保存してから、もう一度再生成してください。');
       if (fields.locked.checked) throw new Error('固定を解除して保存すると、再生成できます。');
-      feedback('公式ガイドを読み、保存済みのAI・モデルで共通プロンプトを生成しています…', false, version);
+      feedback('標準の編集方針を保ち、保存済みのAI・モデルで本人情報と公式ガイドの補足を生成しています…', false, version);
       const result = validateResult(await chrome.runtime.sendMessage({type: 'REGENERATE_PROMPT_PROFILE'}));
       const accepted = adoptResult(result);
       if (accepted && result.profile.status?.state === 'success') {

@@ -312,6 +312,23 @@ test('agent scope accepts an empty project list without adding the current proje
   assert.deepEqual(calls[0].backlog.projectKeys, []);
 });
 
+test('agent comment exclusion is validated at the native boundary and passed through without entering the prompt', async t => {
+  const backlog = {origin: 'https://example.backlog.com', apiKey: 'secret', issueKeys: ['TEST-1'], projectKeys: []};
+  const calls = [];
+  const host = setup(t, {generateAgent: async input => {calls.push(input); return {text: '完成文', sources: [], toolCalls: 0};}});
+  const excludedComment = {issueKey: 'TEST-1', commentId: 45};
+  host.send(request('excluded-valid', {mode: 'agent', backlog: {...backlog, excludedComment}}));
+  assert.equal((await host.waitFor(1))[0].ok, true);
+  assert.deepEqual(calls[0].backlog.excludedComment, excludedComment);
+  assert.ok(!calls[0].prompt.includes('excludedComment') && !calls[0].prompt.includes('secret'));
+  const invalid = [null, [], {}, {issueKey: 'OTHER-1', commentId: 45}, {issueKey: 'TEST-1', commentId: '45'},
+    {issueKey: 'TEST-1', commentId: 0}, {issueKey: 'TEST-1', commentId: 1.5}, {...excludedComment, body: 'hidden text'}];
+  invalid.forEach((value, index) => host.send(request(`excluded-bad-${index}`, {mode: 'agent', backlog: {...backlog, excludedComment: value}})));
+  const replies = await host.waitFor(1 + invalid.length);
+  assert.ok(replies.slice(1).every(reply => reply.ok === false));
+  assert.equal(calls.length, 1);
+});
+
 test('generate_prompt routes to the selected text provider with purpose prompt and no reply guard', async t => {
   const calls = [];
   const host = setup(t, {generateAgent: async () => {throw new Error('must not use agent');}, generate: async input => {

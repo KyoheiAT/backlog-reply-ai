@@ -1,4 +1,4 @@
-const ids = ['backlogKey', 'backlogSpaceUrl', 'provider', 'copilotModel', 'codexModel', 'maxComments'];
+const ids = ['backlogKey', 'backlogSpaceUrl', 'provider', 'copilotModel', 'codexModel', 'maxComments', 'excludeLatestOwnComment'];
 const providers = ['copilot', 'codex'];
 const manualOption = '@manual';
 const modelPattern = /^[a-zA-Z0-9._:/-]{0,100}$/;
@@ -150,6 +150,7 @@ async function initialize() {
     renderModelPicker(provider);
   }
   document.getElementById('maxComments').value = Math.min(100, Math.max(1, Math.floor(Number(settings.maxComments) || 50)));
+  document.getElementById('excludeLatestOwnComment').checked = settings.excludeLatestOwnComment === true;
   document.getElementById('extensionId').textContent = chrome.runtime.id;
   document.getElementById('setupCommand').textContent = `npm run setup -- --extension-id ${chrome.runtime.id}`;
   settingsLoaded = true;
@@ -192,7 +193,8 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
       backlogKey: document.getElementById('backlogKey').value.trim(),
       backlogSpaceUrl: normalizeSpaceUrl(document.getElementById('backlogSpaceUrl').value),
       provider: document.getElementById('provider').value,
-      maxComments: Math.min(100, Math.max(1, Math.floor(Number(document.getElementById('maxComments').value) || 50)))
+      maxComments: Math.min(100, Math.max(1, Math.floor(Number(document.getElementById('maxComments').value) || 50))),
+      excludeLatestOwnComment: document.getElementById('excludeLatestOwnComment').checked === true
     };
     if (!settings.backlogKey) throw new Error('Backlog APIキーを入力してください。');
     for (const provider of providers) {

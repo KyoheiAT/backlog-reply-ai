@@ -22,7 +22,7 @@ const aborted = () => Object.assign(new Error('Backlog MCPの読み取りを中�
 const positiveId = value => Number.isSafeInteger(value) && value > 0;
 const plainObject = value => value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 
-export function validateBacklogScope({ origin, apiKey, issueKeys, projectKeys, maxToolCalls = 6 }) {
+export function validateBacklogScope({ origin, apiKey, issueKeys, projectKeys, maxToolCalls = 6, excludedComment }) {
   const hostPattern = /^https:\/\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:backlog\.(?:com|jp)|backlogtool\.com))\/?$/i;
   const match = typeof origin === 'string' && origin.match(hostPattern);
   if (!match) throw new Error('BacklogのHTTPSスペースURLを指定してください（ポート・パス指定は不可）。');
@@ -34,8 +34,14 @@ export function validateBacklogScope({ origin, apiKey, issueKeys, projectKeys, m
     throw new Error('参照プロジェクトキーは0〜4件で指定してください。');
   }
   if (!Number.isInteger(maxToolCalls) || maxToolCalls < 1 || maxToolCalls > 6) throw new Error('MCPの読み取り回数は1〜6回で指定してください。');
+  if (excludedComment !== undefined && (!plainObject(excludedComment)
+    || Object.keys(excludedComment).some(key => !['issueKey', 'commentId'].includes(key))
+    || !issueKeys.includes(excludedComment.issueKey) || !positiveId(excludedComment.commentId))) {
+    throw new Error('テスト用の除外コメントを確認してください。');
+  }
   return { origin: `https://${match[1].toLowerCase()}`, domain: match[1].toLowerCase(), apiKey: apiKey.trim(),
-    issueKeys: new Set(issueKeys), projectKeys: new Set(projectKeys), maxToolCalls };
+    issueKeys: new Set(issueKeys), projectKeys: new Set(projectKeys), maxToolCalls,
+    ...(excludedComment ? { excludedComment: { issueKey: excludedComment.issueKey, commentId: excludedComment.commentId } } : {}) };
 }
 
 export function backlogEnvironment(source, directory, scope) {
@@ -374,7 +380,12 @@ export function createBacklogMcpFactory({ spawnImpl = spawn, resolveEntry = offi
           if (comment.projectId !== undefined && (!positiveId(comment.projectId) || (projectId !== undefined && comment.projectId !== projectId))) throw scopeError();
           if (comment.issueId !== undefined && (!positiveId(comment.issueId) || (knownId !== undefined && comment.issueId !== knownId))) throw scopeError();
         }
-        return resultFor(comments.map(comment => ({ id: comment.id, body: short(comment.content, 2500),
+        // Apply the test exclusion after validating the response and resolving
+        // numeric issue IDs, but before any text is truncated or serialized.
+        // Re-reading another page/order cannot put the held-out answer back.
+        const visibleComments = scope.excludedComment?.issueKey === key
+          ? comments.filter(comment => comment.id !== scope.excludedComment.commentId) : comments;
+        return resultFor(visibleComments.map(comment => ({ id: comment.id, body: short(comment.content, 2500),
           author: short(comment.createdUser?.name, 100), created: short(comment.created, 50) })), [{ title: `${key} コメント`, url: `${scope.origin}/view/${key}` }]);
       };
       return {

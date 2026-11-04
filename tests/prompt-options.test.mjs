@@ -8,7 +8,8 @@ const markup = await readFile(new URL('../options.html', import.meta.url), 'utf8
 const flush = async () => {for (let i = 0; i < 40; i++) await Promise.resolve();};
 const profile = (values = {}) => ({displayName: '', profileUrl: '', generatedPrompt: '', fixedPrompt: '', locked: false,
   revision: 0, generatedAt: '', checkedAt: '', sources: [], status: {state: 'idle', message: '', at: ''}, ...values});
-const defaultPrompt = '相手に配慮した丁寧な完成文だけを作成する。\n事実と推測を区別し、次の依頼を明確にする。';
+const defaultPrompt = '';
+const defaultGeneratedPrompt = '相手に配慮した丁寧な完成文だけを作成する。\n事実と推測を区別し、次の依頼を明確にする。';
 
 function harness(initial = profile(), options = {}) {
   let stored = initial;
@@ -35,6 +36,7 @@ function harness(initial = profile(), options = {}) {
     createElement(tag) {return new Element(tag);}
   };
   const result = value => ({ok: true, profile: value, effectivePrompt: `合成済み：${value.displayName}|${value.generatedPrompt}|${value.fixedPrompt}`,
+    defaultGeneratedPrompt: Object.hasOwn(options, 'defaultGeneratedPrompt') ? options.defaultGeneratedPrompt : defaultGeneratedPrompt,
     defaultFixedPrompt: Object.hasOwn(options, 'defaultFixedPrompt') ? options.defaultFixedPrompt : defaultPrompt});
   vm.runInNewContext(source, {document, URL, confirm: message => {confirms.push(message); return confirmResult;}, chrome: {
     runtime: {sendMessage(message) {
@@ -51,6 +53,7 @@ function harness(initial = profile(), options = {}) {
     lock(value) {const input = document.getElementById('promptLocked'); input.checked = value; return input.dispatch('change');},
     save: () => document.getElementById('promptForm').dispatch('submit'),
     regenerate: () => document.getElementById('promptRegenerate').dispatch('click'),
+    resetGenerated: () => document.getElementById('promptResetGenerated').dispatch('click'),
     resetFixed: () => document.getElementById('promptResetFixed').dispatch('click'),
     reload: () => document.getElementById('promptReload').dispatch('click'),
     confirm(value) {confirmResult = value;},
@@ -75,12 +78,14 @@ test('prompt editor is an independent form with explicit labels, limits and a re
   assert.match(markup, /id="promptEffective"[^>]*readonly/);
   assert.match(markup, /id="promptGenerated"[^>]*maxlength="12000"/);
   assert.match(markup, /id="promptFixed"[^>]*maxlength="10000"/);
-  assert.match(markup, /<button\b[^>]*id="promptResetFixed"[^>]*type="button"[^>]*disabled>デフォルトに戻す<\/button>/);
-  assert.match(markup, /「デフォルトに戻す」はこの欄だけを標準に戻します/);
+  assert.match(markup, /<button\b[^>]*id="promptResetGenerated"[^>]*type="button"[^>]*disabled>生成プロンプトをデフォルトに戻す<\/button>/);
+  assert.match(markup, /<button\b[^>]*id="promptResetFixed"[^>]*type="button"[^>]*disabled>追加指示を空に戻す<\/button>/);
+  assert.match(markup, /「生成プロンプトをデフォルトに戻す」はこの欄だけを標準の編集方針に戻します/);
+  assert.match(markup, /基本の編集方針は生成プロンプトに含まれている/);
   for (const id of ['promptDisplayName', 'promptProfileUrl', 'promptGenerated', 'promptFixed', 'promptLocked']) assert.ok(markup.includes(`for="${id}"`));
 });
 
-test('reset replaces only the fixed prompt and remains an unsaved edit until the user saves', async () => {
+test('reset clears only the fixed prompt and remains an unsaved edit until the user saves', async () => {
   const initial = profile({displayName: '保存された本人', profileUrl: 'https://space.backlog.com/user/*person',
     generatedPrompt: '保存した生成指示', fixedPrompt: '保存した独自指示', locked: true, revision: 7});
   const app = harness(initial);
@@ -108,11 +113,12 @@ test('reset replaces only the fixed prompt and remains an unsaved edit until the
   assert.equal(Object.hasOwn(request.message.profile, 'defaultFixedPrompt'), false);
   app.resolve(request, profile({...request.message.profile, revision: 8})); await pending;
   assert.equal(app.element('promptDirty').hidden, true);
-  assert.ok(app.element('promptEffective').value.endsWith(defaultPrompt));
+  assert.equal(app.element('promptFixed').value, '');
+  assert.ok(app.element('promptEffective').value.endsWith('|'));
 });
 
 test('missing or invalid defaults disable reset without preventing profile editing or saving', async () => {
-  for (const value of [undefined, null, '', ' \n ', 'x'.repeat(10001), 'bad\u0000text']) {
+  for (const value of [undefined, null, false, 'x'.repeat(10001), 'bad\u0000text']) {
     const app = harness(profile({fixedPrompt: '保持する独自指示'}), {defaultFixedPrompt: value}); await flush();
     assert.equal(app.element('promptResetFixed').disabled, true);
     app.resetFixed();
@@ -120,6 +126,78 @@ test('missing or invalid defaults disable reset without preventing profile editi
     assert.equal(app.element('promptSave').disabled, false);
     assert.deepEqual(app.requests.map(request => request.message.type), ['GET_PROMPT_PROFILE']);
   }
+});
+
+test('generated reset changes only the main prompt, is available while locked and saves only on submission', async () => {
+  const initial = profile({displayName: '保存名', profileUrl: 'https://space.backlog.com/user/me', generatedPrompt: '古い生成文',
+    fixedPrompt: '残す個別ルール', locked: true, revision: 6});
+  const app = harness(initial);
+  assert.equal(app.element('promptResetGenerated').disabled, true);
+  app.resetGenerated();
+  await flush();
+  app.type('promptDisplayName', '編集中の本人');
+  app.type('promptFixed', '編集中の補足');
+  const savedPreview = app.element('promptEffective').value;
+  assert.equal(app.element('promptResetGenerated').disabled, false);
+  app.resetGenerated();
+  assert.equal(app.element('promptGenerated').value, defaultGeneratedPrompt);
+  assert.equal(app.element('promptDisplayName').value, '編集中の本人');
+  assert.equal(app.element('promptProfileUrl').value, initial.profileUrl);
+  assert.equal(app.element('promptFixed').value, '編集中の補足');
+  assert.equal(app.element('promptLocked').checked, true);
+  assert.equal(app.element('promptEffective').value, savedPreview);
+  assert.equal(app.element('promptDirty').hidden, false);
+  assert.match(app.element('promptFeedback').textContent, /生成プロンプト.*保存.*適用/);
+  assert.deepEqual(app.requests.map(request => request.message.type), ['GET_PROMPT_PROFILE']);
+  const pending = app.save(); const request = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(request.message.profile.generatedPrompt, defaultGeneratedPrompt);
+  assert.equal(request.message.profile.fixedPrompt, '編集中の補足');
+  assert.equal(request.message.profile.revision, 6);
+  assert.equal(Object.hasOwn(request.message.profile, 'defaultGeneratedPrompt'), false);
+  app.resolve(request, profile({...request.message.profile, revision: 7})); await pending;
+  assert.equal(app.element('promptDirty').hidden, true);
+  assert.ok(app.element('promptEffective').value.includes(defaultGeneratedPrompt));
+});
+
+test('unavailable or malformed generated defaults disable only generated reset', async () => {
+  for (const value of [undefined, null, false, '', ' \n ', 'x'.repeat(12001), 'bad\u0000text']) {
+    const app = harness(profile({generatedPrompt: '維持する主プロンプト', fixedPrompt: '個別ルール'}), {defaultGeneratedPrompt: value});
+    await flush();
+    assert.equal(app.element('promptResetGenerated').disabled, true);
+    assert.equal(app.element('promptResetFixed').disabled, false, 'an empty additional default is valid');
+    app.resetGenerated();
+    assert.equal(app.element('promptGenerated').value, '維持する主プロンプト');
+    assert.equal(app.element('promptSave').disabled, false);
+    assert.deepEqual(app.requests.map(request => request.message.type), ['GET_PROMPT_PROFILE']);
+  }
+});
+
+test('generated reset is blocked during saving and retains newer edits when the save completes', async () => {
+  const app = harness(profile({generatedPrompt: '以前の主プロンプト', fixedPrompt: '個別ルール'})); await flush();
+  app.resetGenerated();
+  const pending = app.save(); const request = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(app.element('promptResetGenerated').disabled, true);
+  app.type('promptGenerated', '保存待ちに編集した主プロンプト');
+  app.resetGenerated();
+  assert.equal(app.element('promptGenerated').value, '保存待ちに編集した主プロンプト');
+  app.resolve(request, profile({...request.message.profile, revision: 1})); await pending;
+  assert.equal(app.element('promptGenerated').value, '保存待ちに編集した主プロンプト');
+  assert.equal(app.element('promptResetGenerated').disabled, false);
+  assert.equal(app.element('promptDirty').hidden, false);
+  assert.ok(app.element('promptEffective').value.includes(defaultGeneratedPrompt));
+});
+
+test('generated reset during generation remains a dirty edit if a later result arrives', async () => {
+  const app = harness(profile({displayName: '本人', generatedPrompt: '以前の主プロンプト', fixedPrompt: '残す補足', revision: 3})); await flush();
+  const pending = app.regenerate(); const request = app.next('REGENERATE_PROMPT_PROFILE');
+  assert.equal(app.element('promptResetGenerated').disabled, false);
+  app.resetGenerated();
+  app.resolve(request, profile({displayName: '本人', generatedPrompt: '後から届いた生成結果', fixedPrompt: '残す補足', revision: 4,
+    status: {state: 'success'}})); await pending;
+  assert.equal(app.element('promptGenerated').value, defaultGeneratedPrompt);
+  assert.equal(app.element('promptFixed').value, '残す補足');
+  assert.match(app.element('promptEffective').value, /後から届いた生成結果/);
+  assert.match(app.element('promptDirty').textContent, /競合/);
 });
 
 test('reset is blocked during a save and becomes available again after completion', async () => {

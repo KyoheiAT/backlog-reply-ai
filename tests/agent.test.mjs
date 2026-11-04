@@ -84,6 +84,31 @@ test('can draft from supplied context without making a lookup and never invents 
   assert.equal(state.closed, 1);
 });
 
+test('test exclusion is copied only to MCP configuration and does not become model data', async () => {
+  const { generate, state } = fixture([reply('確認いたします。')]);
+  const excludedComment = { issueKey: 'TEST-1', commentId: 198765432 };
+  await generate({ ...input, backlog: { ...input.backlog, excludedComment } });
+  assert.deepEqual(state.options.excludedComment, excludedComment);
+  assert.notEqual(state.options.excludedComment, excludedComment);
+  for (const request of state.requests) {
+    assert.ok(!request.prompt.includes('excludedComment'));
+    assert.ok(!request.prompt.includes('198765432'));
+    assert.ok(!request.prompt.includes(apiKey));
+  }
+});
+
+test('invalid test exclusions fail before opening MCP or making a model request', async () => {
+  for (const excludedComment of [null, false, [], {}, { issueKey: 'TEST-2', commentId: 42 },
+    { issueKey: 'TEST-1', commentId: 0 }, { issueKey: 'TEST-1', commentId: '42' },
+    { issueKey: 'TEST-1', commentId: 1.5 }, { issueKey: 'TEST-1', commentId: Number.MAX_SAFE_INTEGER + 1 },
+    { issueKey: 'TEST-1', commentId: 42, body: 'excluded-answer' }]) {
+    const { generate, state } = fixture([]);
+    await assert.rejects(generate({ ...input, backlog: { ...input.backlog, excludedComment } }), /除外コメント/);
+    assert.equal(state.created, 0);
+    assert.equal(state.requests.length, 0);
+  }
+});
+
 test('JSON replies preserve addressee, paragraph, quote and literal backslash boundaries for both providers', async () => {
   for (const provider of ['copilot', 'codex']) for (const format of ['markdown', 'backlog']) {
     const quote = format === 'markdown'
@@ -347,7 +372,9 @@ test('Codex plan purpose changes only the text instruction and retains tool/shel
   const normal = codexArguments('test-model');
   const plan = codexArguments('test-model', 'plan');
   const instruction = args => args.find(value => value.startsWith('developer_instructions='));
-  assert.match(instruction(normal), /Return only the reply body/);
+  assert.match(instruction(normal), /Return only the requested finished text/);
+  assert.match(instruction(normal), /polish the user's draft, or summarize/);
+  assert.match(instruction(plan), /polish the user's draft, or summarize/);
   assert.match(instruction(plan), /JSON decision/);
   assert.deepEqual(plan.filter(value => value !== instruction(plan)), normal.filter(value => value !== instruction(normal)));
   assert.ok(plan.includes('approval_policy="never"'));

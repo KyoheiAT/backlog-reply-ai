@@ -42,11 +42,14 @@
     <p id="formattingDetails" class="note model-status"></p>
     <p class="note">再確認には保存済みのURL・APIキーを使います。編集した場合は、先に「設定を保存」を押してください。記法の取得にAIの利用枠は使いません。</p>
     <label for="maxComments">取得する直近コメント件数（1〜100）</label><input id="maxComments" type="number" min="1" max="100" step="1" required>
+    <h2 id="promptTestHeading">プロンプトのテスト</h2>
+    <label class="prompt-checkbox" for="excludeLatestOwnComment"><input id="excludeLatestOwnComment" type="checkbox" aria-describedby="excludeLatestOwnCommentNote">テスト時に直近の自分のコメントを除外する</label>
+    <p id="excludeLatestOwnCommentNote" class="note">初期状態はOFFです。ONにすると、現在の課題で自分が最後に投稿した本文のあるコメント1件を、AIに渡す履歴から除外します。その後に別の人が投稿していても、自分の最後のコメントが対象です。本人は保存済みのBacklog APIキーのユーザーで確認し、通常の返信作成・エージェントモードの両方に適用します。Backlog上のコメントは変更しません。</p>
     <button id="save" type="submit">設定を保存</button><p id="status" role="status" aria-live="polite"></p>
   </form>
   <section class="prompt-section" aria-labelledby="promptHeading">
     <h2 id="promptHeading">共通プロンプトと本人情報</h2>
-    <p class="info">表示名を登録すると、Chrome起動時にBacklogの公式ガイドを読み、保存済みのAI・モデルで共通プロンプトを生成します。生成するたびに契約の利用枠を消費します。以下の設定は、上のAI・APIキー設定とは別に保存します。</p>
+    <p class="info">生成プロンプトは、GPTの指示を基にした標準の編集方針と、本人情報・Backlog公式ガイドの補足をまとめた主プロンプトです。表示名を登録すると、Chrome起動時に保存済みのAI・モデルで補足を再生成します。標準の編集方針の全文は再生成でも維持します。生成するたびに契約の利用枠を消費します。以下の設定は、上のAI・APIキー設定とは別に保存します。</p>
     <p class="note">参照するのは公式の5記事です。「課題と状態」「お知らせ機能の概要」「プロジェクトの基本設定」と、Backlog記法・Markdown記法のガイドを使います。</p>
     <form id="promptForm">
       <label for="promptDisplayName">返信する本人の表示名</label>
@@ -56,12 +59,13 @@
       <p id="promptIdentityNote" class="note">表示名とURLを別々に入力します。URLは対応BacklogドメインのHTTPSの /user/… 形式です。末尾の * も保存できます。表示名が未登録の場合、自動生成をスキップします。</p>
       <label for="promptGenerated">生成プロンプト（確認・編集できます）</label>
       <textarea id="promptGenerated" rows="12" maxlength="12000" aria-describedby="promptGeneratedNote"></textarea>
-      <p id="promptGeneratedNote" class="note">再生成すると、この欄を新しい生成結果で置き換えます。編集した内容を使い続ける場合は、固定をオンにして保存してください。生成失敗時は以前の内容を保持します。</p>
+      <button id="promptResetGenerated" class="prompt-secondary" type="button" aria-describedby="promptGeneratedNote" disabled>生成プロンプトをデフォルトに戻す</button>
+      <p id="promptGeneratedNote" class="note">返信作成・文章整形・文体・段落の基本方針は、この欄で確認できます。「生成プロンプトをデフォルトに戻す」はこの欄だけを標準の編集方針に戻します。本人情報・公式ガイドの補足も含めるには再生成してください。再生成では、この欄全体を標準の編集方針と新しい補足で置き換えます。独自に編集した内容を使い続ける場合は、固定をオンにして保存してください。生成失敗時は以前の内容を保持します。</p>
       <label class="prompt-checkbox" for="promptLocked"><input id="promptLocked" type="checkbox"><span>生成プロンプトを固定（起動時・手動の再生成を停止）</span></label>
       <label for="promptFixed">常に追加する指示</label>
-      <textarea id="promptFixed" rows="6" maxlength="10000" placeholder="例：返信は簡潔にし、確認してほしい点を最後にまとめる。" aria-describedby="promptFixedNote"></textarea>
-      <button id="promptResetFixed" class="prompt-secondary" type="button" aria-describedby="promptFixedNote" disabled>デフォルトに戻す</button>
-      <p id="promptFixedNote" class="note">標準プロンプトを編集して使えます。「デフォルトに戻す」はこの欄だけを標準に戻します。変更後は「プロンプト設定を保存」で適用してください。保存後は毎回の返信作成に追加し、自動・手動の再生成では変更しません。共通の安全ルールも引き続き適用します。</p>
+      <textarea id="promptFixed" rows="6" maxlength="10000" placeholder="必要な場合だけ、用語や文体の個別ルールを追加してください。" aria-describedby="promptFixedNote"></textarea>
+      <button id="promptResetFixed" class="prompt-secondary" type="button" aria-describedby="promptFixedNote" disabled>追加指示を空に戻す</button>
+      <p id="promptFixedNote" class="note">初期値は空欄です。基本の編集方針は生成プロンプトに含まれているため、この欄には個別の補足だけを記入します。「追加指示を空に戻す」はこの欄だけを初期値に戻します。変更後は「プロンプト設定を保存」で適用してください。保存後は毎回の返信作成に追加し、自動・手動の再生成では変更しません。共通の安全ルールも引き続き適用します。</p>
       <p class="note">標準では、完成文を外側のコードブロックで囲まず、コメント欄にそのまま使える文面を出力します。</p>
       <div class="prompt-actions">
         <button id="promptSave" type="submit" disabled>プロンプト設定を保存</button>

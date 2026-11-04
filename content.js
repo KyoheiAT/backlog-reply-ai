@@ -155,8 +155,18 @@
     const matches = editorSelectors.flatMap(selector => [...document.querySelectorAll(selector)]);
     return matches.find(el => el.isConnected && !el.closest('#bcr-root') && el.getClientRects().length > 0) || null;
   }
-  function setEditorValue(editor, value) {
+  function editorText(editor) {
+    return String(editor.matches('textarea,input') ? editor.value : editor.innerText).replace(/\r\n?/g, '\n');
+  }
+  function comparableEditorText(value) {
+    // Paragraph-based editors can add blank lines and non-breaking spaces to
+    // innerText. Ignore those rendering differences, but still require every
+    // line of the generated text (and no remaining draft) to be present.
+    return value.replace(/\u00a0/g, ' ').replace(/\n+/g, '\n').trim();
+  }
+  async function setEditorValue(editor, value, assertCurrent) {
     value = String(value).replace(/\r\n?/g, '\n');
+    assertCurrent();
     if (editor.matches('textarea,input')) {
       const proto = editor.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
@@ -166,11 +176,24 @@
       editor.dispatchEvent(new Event('change', {bubbles: true}));
     } else if (editor.isContentEditable) {
       editor.focus();
+      const originalText = editorText(editor);
       const selection = window.getSelection();
+      if (!selection) throw new Error('コメント入力欄の選択範囲を取得できません。');
       const range = document.createRange();
       range.selectNodeContents(editor);
       selection.removeAllRanges();
       selection.addRange(range);
+      const selectedText = selection.toString();
+      // The DOM selection changes immediately, but controlled editors update
+      // their model selection from a queued (sometimes debounced) selectionchange.
+      // Pasting in the same task uses the old caret and appends to the draft.
+      await new Promise(resolve => setTimeout(resolve, 150));
+      assertCurrent();
+      if (editorText(editor) !== originalText || document.activeElement !== editor ||
+          selection.rangeCount !== 1 || !editor.contains(selection.anchorNode) ||
+          !editor.contains(selection.focusNode) || selection.toString() !== selectedText) {
+        throw new Error('反映の準備中にコメント入力欄や選択範囲が変更されたため、挿入を中止しました。もう一度生成してください。');
+      }
       let handledPaste = false;
       try {
         // Rich-text editors keep their own paragraph model. Let their paste
@@ -182,8 +205,8 @@
           clipboardData, bubbles: true, cancelable: true, composed: true
         }));
       } catch (_) { /* Older or restricted editors can use the fallback below. */ }
-      // preventDefault means the editor consumed the paste, possibly with an
-      // asynchronous render. Do not replace its DOM while that update is pending.
+      // preventDefault only means the editor accepted the event. Its model may
+      // render asynchronously; verify the result below before reporting success.
       if (!handledPaste) {
         let inserted = false;
         try { inserted = document.execCommand('insertText', false, value); } catch (_) {}
@@ -196,6 +219,17 @@
           editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: value}));
         }
       }
+      const expected = comparableEditorText(value);
+      let matchingChecks = 0;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        assertCurrent();
+        matchingChecks = comparableEditorText(editorText(editor)) === expected ? matchingChecks + 1 : 0;
+        if (matchingChecks === 2) return;
+      }
+      // Never retry a consumed paste or overwrite a controlled editor's DOM:
+      // either can duplicate the reply or disagree with its internal model.
+      throw new Error('生成文への置き換えを確認できませんでした。コメント入力欄に元の文が残っていないか確認してください。');
     } else throw new Error('対応していない入力欄です。');
     editor.focus();
   }
@@ -432,7 +466,17 @@
           }
           setStatus(currentTask.path, '生成文をコメント入力欄に反映しています。');
         }
-        setEditorValue(target, result.text);
+        const assertCurrentEditor = () => {
+          checkNavigation();
+          if (disposed || currentTask.version !== navigationVersion || location.pathname !== currentTask.path) {
+            throw new Error('課題の表示が変わったため、生成文の挿入を中止しました。');
+          }
+          if (!target.isConnected || findEditor() !== target) {
+            throw new Error('コメント入力欄が切り替わったため、生成文の挿入を中止しました。');
+          }
+        };
+        await setEditorValue(target, result.text, assertCurrentEditor);
+        assertCurrentEditor();
         setStatus(currentTask.path, `${providerLabel(result.provider)}の生成文を挿入しました（参照コメント ${result.commentsUsed} 件）。確認して手動で投稿してください。`, 'ok', true);
       } catch (error) {
         if (isConnectionError(error)) connectionFailed = true;

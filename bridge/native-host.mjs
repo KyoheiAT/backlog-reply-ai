@@ -41,6 +41,13 @@ function validBacklog(value) {
     if (origin.origin !== value.origin || origin.protocol !== 'https:' || origin.port || origin.username || origin.password
       || !/^[a-z0-9-]+\.(?:backlog\.com|backlog\.jp|backlogtool\.com)$/i.test(origin.hostname)) return false;
   } catch {return false;}
+  if (value.excludedComment !== undefined) {
+    const excluded = value.excludedComment;
+    if (!excluded || typeof excluded !== 'object' || Array.isArray(excluded)
+      || Object.keys(excluded).some(key => !['issueKey', 'commentId'].includes(key))
+      || typeof excluded.issueKey !== 'string' || !Array.isArray(value.issueKeys) || !value.issueKeys.includes(excluded.issueKey)
+      || !Number.isSafeInteger(excluded.commentId) || excluded.commentId <= 0) return false;
+  }
   return Array.isArray(value.issueKeys) && value.issueKeys.length >= 1 && value.issueKeys.length <= 6
     && value.issueKeys.every(key => typeof key === 'string' && /^[A-Z0-9_]+-\d+$/.test(key) && key.length <= 120)
     && Array.isArray(value.projectKeys) && value.projectKeys.length <= 4

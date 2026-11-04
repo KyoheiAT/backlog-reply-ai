@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { access } from 'node:fs/promises';
 import { createBacklogMcpFactory, validateBacklogScope } from '../bridge/backlog-mcp.mjs';
+import { createAgentReplyGenerator } from '../bridge/agent.mjs';
 
 const options = { origin: 'https://example.backlog.com', apiKey: 'synthetic-secret-value', issueKeys: ['DEMO-1'], projectKeys: ['DEMO'] };
 const project = (key = 'DEMO', id = 10) => ({ id, projectKey: key, name: `Project ${key}` });
@@ -85,6 +86,21 @@ test('scope accepts only HTTPS tenant origins and bounded explicit keys', () => 
   for (const patch of [{ issueKeys: [] }, { projectKeys: undefined }, { issueKeys: ['../other'] }, { projectKeys: ['DEMO/path'] },
     { issueKeys: Array(7).fill('DEMO-1') }, { projectKeys: Array(5).fill('DEMO') }, { maxToolCalls: 7 }, { apiKey: 'key\r\nvalue' }]) {
     assert.throws(() => validateBacklogScope({ ...options, ...patch }));
+  }
+});
+
+test('test exclusion accepts one explicit issue/comment ID only and copies its metadata', () => {
+  const excludedComment = { issueKey: 'DEMO-1', commentId: 42 };
+  const scope = validateBacklogScope({ ...options, excludedComment });
+  assert.deepEqual(scope.excludedComment, excludedComment);
+  excludedComment.commentId = 999;
+  assert.equal(scope.excludedComment.commentId, 42);
+  assert.equal(validateBacklogScope(options).excludedComment, undefined);
+  for (const invalid of [null, false, [], {}, { issueKey: 'DEMO-2', commentId: 42 },
+    { issueKey: 'DEMO-1', commentId: 0 }, { issueKey: 'DEMO-1', commentId: '42' },
+    { issueKey: 'DEMO-1', commentId: 1.5 }, { issueKey: 'DEMO-1', commentId: Number.MAX_SAFE_INTEGER + 1 },
+    { issueKey: 'DEMO-1', commentId: 42, body: 'Must never be passed to the model' }]) {
+    assert.throws(() => validateBacklogScope({ ...options, excludedComment: invalid }), /除外コメント/);
   }
 });
 
@@ -245,6 +261,69 @@ test('comments have a bounded count, validated identity, and a generated source 
   await assert.rejects(mcp.callTool('get_issue_comments', { issueKey: 'DEMO-1', count: 21 }), /参照範囲外/);
   wrongIdentity = true;
   await assert.rejects(mcp.callTool('get_issue_comments', { issueKey: 'DEMO-1' }), /参照範囲外/);
+});
+
+test('held-out comment stays excluded through numeric aliases, order and pagination before serialization', async t => {
+  const fixture = setup({ onTool: (name, args) => name === 'get_issue' ? issue() : [
+    { id: 42, content: args.issueKey === 'DEMO-1' ? 'held-out-answer '.repeat(4000) : 'other-issue-kept' },
+    { id: 43, content: 'visible-follow-up' },
+  ] });
+  const mcp = await open(t, fixture, { issueKeys: ['DEMO-1', 'DEMO-2'],
+    excludedComment: { issueKey: 'DEMO-1', commentId: 42 } });
+  await mcp.callTool('get_issue', { issueKey: 'DEMO-1' });
+  for (const args of [
+    { issueKey: 'DEMO-1' },
+    { issueId: 101, order: 'asc', minId: 40 },
+    { issueKey: 'DEMO-1', order: 'desc', maxId: 50, count: 2 },
+  ]) {
+    const result = await mcp.callTool('get_issue_comments', args);
+    assert.deepEqual(JSON.parse(result.text).map(comment => comment.id), [43]);
+    assert.ok(result.text.includes('visible-follow-up'));
+    assert.ok(!result.text.includes('held-out-answer'));
+    assert.ok(!JSON.stringify(result).includes('excludedComment'));
+  }
+  const other = await mcp.callTool('get_issue_comments', { issueKey: 'DEMO-2' });
+  assert.deepEqual(JSON.parse(other.text).map(comment => comment.id), [42, 43]);
+  assert.ok(other.text.includes('other-issue-kept'));
+  assert.ok(fixture.toolCalls.every(call => !Object.hasOwn(call.arguments, 'excludedComment')));
+});
+
+test('comments remain unchanged when the test exclusion is not enabled', async t => {
+  const fixture = setup({ onTool: () => [{ id: 42, content: 'latest-own-answer' }, { id: 41, content: 'earlier-message' }] });
+  const mcp = await open(t, fixture);
+  const result = await mcp.callTool('get_issue_comments', { issueKey: 'DEMO-1' });
+  assert.deepEqual(JSON.parse(result.text).map(comment => comment.id), [42, 41]);
+  assert.ok(result.text.includes('latest-own-answer'));
+});
+
+test('agent re-fetch cannot expose the excluded comment to either provider', async () => {
+  for (const provider of ['copilot', 'codex']) {
+    const fixture = setup({ onTool: () => [
+      { id: 42, content: 'excluded-answer-sentinel' },
+      { id: 41, content: 'question-to-answer' },
+    ] });
+    const requests = [];
+    const generate = createAgentReplyGenerator({
+      createMcp: fixture.create,
+      generate: async request => {
+        requests.push(request);
+        return JSON.stringify(requests.length === 1
+          ? { action: 'tool', name: 'get_issue_comments', arguments: { issueKey: 'DEMO-1' } }
+          : { action: 'reply', text: 'テスト用の新しい返信です。' });
+      },
+    });
+    const result = await generate({ provider, prompt: '既存の回答を見ずに返信を作成してください。',
+      backlog: { ...options, excludedComment: { issueKey: 'DEMO-1', commentId: 42 } } });
+    assert.equal(result.text, 'テスト用の新しい返信です。');
+    assert.equal(requests.length, 2);
+    assert.ok(requests[1].prompt.includes('question-to-answer'));
+    for (const request of requests) {
+      assert.ok(!request.prompt.includes('excluded-answer-sentinel'));
+      assert.ok(!request.prompt.includes(options.apiKey));
+      assert.ok(!request.prompt.includes('excludedComment'));
+    }
+    await assert.rejects(access(fixture.spawns[0].settings.cwd), { code: 'ENOENT' });
+  }
 });
 
 test('untrusted fields and links are not followed, summaries are bounded, and echoed keys are redacted', async t => {

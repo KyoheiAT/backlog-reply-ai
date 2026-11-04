@@ -12,6 +12,7 @@ const recoverySource = await readFile(new URL('../tab-recovery.js', import.meta.
 const defaultsContext = vm.createContext({});
 vm.runInContext(promptDefaultsSource, defaultsContext);
 const defaultFixedPrompt = defaultsContext.BacklogPromptDefaults.fixedPrompt;
+const defaultGeneratedPrompt = defaultsContext.BacklogPromptDefaults.generatedPrompt;
 const contentSource = await readFile(new URL('../content.js', import.meta.url), 'utf8');
 const manifest = JSON.parse((await readFile(new URL('../manifest.json', import.meta.url), 'utf8')).replace(/^\uFEFF/, ''));
 const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
@@ -122,6 +123,127 @@ function assertPortsClosed(app) {
   assert.ok(app.ports.every(port => port.onMessage.count() === 0 && port.onDisconnect.count() === 0));
   assert.equal(app.timers.size, 0);
 }
+
+function commentHistoryFixture({settings = {}, pages, myself = {id: 7, name: '本人'}, status = 200} = {}) {
+  const own = (id, content, authorId = 7) => ({id, content, createdUser: {id: authorId, name: '同じ表示名'}, created: '2026-11-04T00:00:00Z'});
+  return background({settings, fetch: url => {
+    const target = new URL(url);
+    if (target.pathname === '/api/v2/users/myself') return response(myself, status);
+    if (target.pathname.endsWith('/comments')) return response(pages ? pages(target, own) : [
+      own(40, '', 7), own(39, '相手からの最新の確認', 8), own(38, 'EXCLUDED_LATEST_OWN'),
+      own(37, '同姓同名の別ユーザー', 8), own(36, '以前の本人のコメント')
+    ]);
+    if (target.pathname.includes('/projects/')) return response({projectKey: 'TEST', textFormattingRule: 'markdown'});
+    if (target.pathname.endsWith('/space')) return response({textFormattingRule: 'markdown'});
+    return response({summary: '確認依頼', description: '課題の本文'});
+  }});
+}
+
+test('latest-own exclusion is strictly opt-in and does not fetch identity or alter history when off', async () => {
+  for (const value of [undefined, false, 'true', 1]) {
+    const app = commentHistoryFixture({settings: {excludeLatestOwnComment: value}});
+    await app.handle({...generation, mode: 'agent'});
+    const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
+    assert.match(request.prompt, /EXCLUDED_LATEST_OWN/);
+    assert.equal(request.backlog.excludedComment, undefined);
+    assert.ok(!app.calls.some(call => new URL(call.url).pathname === '/api/v2/users/myself'));
+    assert.equal(new URL(app.calls.find(call => call.url.includes('/comments?')).url).searchParams.get('count'), '50');
+    assertPortsClosed(app);
+  }
+});
+
+test('both providers and modes omit exactly the latest nonempty authenticated-user comment before model input', async () => {
+  for (const provider of ['copilot', 'codex']) for (const mode of ['chat', 'agent']) {
+    const app = commentHistoryFixture({settings: {provider, excludeLatestOwnComment: true,
+      promptProfile: {displayName: '別の登録名', profileUrl: 'https://example.backlog.com/user/another'}}});
+    const result = await app.handle({...generation, provider, mode, requestId: 'exclude'}, {...sender, tab: {id: 1}});
+    const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
+    const context = JSON.parse(request.prompt.slice(request.prompt.lastIndexOf('\n\n') + 2));
+    assert.equal(result.commentsUsed, 4);
+    assert.equal(context.comments.length, 4);
+    assert.ok(!request.prompt.includes('EXCLUDED_LATEST_OWN'));
+    for (const kept of ['相手からの最新の確認', '同姓同名の別ユーザー', '以前の本人のコメント']) assert.ok(request.prompt.includes(kept));
+    assert.ok(!request.prompt.includes('secret-backlog-key'));
+    if (mode === 'agent') assert.deepEqual(JSON.parse(JSON.stringify(request.backlog.excludedComment)), {issueKey: 'TEST-12', commentId: 38});
+    else assert.equal(request.backlog, undefined);
+    assert.equal(app.updates.filter(update => /1件をAIへの履歴から除外/.test(update.message.message)).length, 1);
+    assertPortsClosed(app);
+  }
+});
+
+test('exclusion searches beyond the model history window and handles an inclusive page boundary', async () => {
+  const app = commentHistoryFixture({settings: {excludeLatestOwnComment: true, maxComments: 2}, pages: (target, own) => {
+    assert.equal(target.searchParams.get('count'), '100');
+    const maxId = target.searchParams.get('maxId');
+    if (!maxId) return Array.from({length: 100}, (_, index) => own(300 - index, `other-${index}`, 8));
+    assert.equal(maxId, '201');
+    return [own(201, 'boundary', 8), own(200, 'EXCLUDED_LATEST_OWN'), own(199, 'older own')];
+  }});
+  const result = await app.handle({...generation, mode: 'agent'});
+  const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
+  assert.equal(request.backlog.excludedComment.commentId, 200);
+  assert.equal(result.commentsUsed, 2);
+  assert.match(request.prompt, /other-0/);
+  assert.ok(!request.prompt.includes('EXCLUDED_LATEST_OWN') && !request.prompt.includes('older own'));
+  assert.equal(app.calls.filter(call => call.url.includes('/comments?')).length, 2);
+  assertPortsClosed(app);
+});
+
+test('an absent own comment is reported without dropping others or exposing user account data', async () => {
+  const app = commentHistoryFixture({settings: {excludeLatestOwnComment: true},
+    myself: {id: 7, mailAddress: 'private-address@example.invalid'},
+    pages: (_, own) => [own(4, '', 7), own(3, '相手の本文', 8)]});
+  const result = await app.handle({...generation, mode: 'agent', requestId: 'absent'}, {...sender, tab: {id: 1}});
+  const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
+  assert.equal(result.commentsUsed, 2);
+  assert.equal(request.backlog.excludedComment, undefined);
+  assert.ok(!request.prompt.includes('private-address'));
+  assert.ok(app.updates.some(update => /除外する自分のコメントはありません/.test(update.message.message)));
+  assertPortsClosed(app);
+});
+
+test('identity failures and malformed history stop the opt-in test before generation', async () => {
+  for (const options of [{myself: {}}, {status: 403}, {pages: () => [{content: 'unknown ID', createdUser: {id: 7}}]}]) {
+    const app = commentHistoryFixture({settings: {excludeLatestOwnComment: true}, ...options});
+    await assert.rejects(app.handle(), /本人情報|HTTP 403|コメントを確認/);
+    assert.ok(app.nativeMessages.every(({message}) => message.type !== 'generate'));
+    assertPortsClosed(app);
+  }
+});
+
+test('bounded history search fails visibly instead of silently using an unverified own comment', async () => {
+  const app = commentHistoryFixture({settings: {excludeLatestOwnComment: true}, pages: (target, own) => {
+    const top = Number(target.searchParams.get('maxId') || 5000);
+    return Array.from({length: 100}, (_, index) => own(top - index, '別ユーザーの投稿', 8));
+  }});
+  await assert.rejects(app.handle(), /検索上限/);
+  assert.equal(app.calls.filter(call => call.url.includes('/comments?')).length, 10);
+  assert.ok(app.nativeMessages.every(({message}) => message.type !== 'generate'));
+  assertPortsClosed(app);
+});
+
+test('saved legacy prompts are preserved but followed by an explicit editing and data contract in both modes', async () => {
+  const generatedPrompt = '簡潔な新規返信だけ。{{課題情報}} と {{コメント履歴}} に従う。';
+  const fixedPrompt = 'CUSTOM_STYLE_SENTINEL';
+  for (const mode of ['chat', 'agent']) {
+    const app = background({settings: {promptProfile: {generatedPrompt, fixedPrompt, locked: true}}});
+    const instruction = '整えて：確認してください。金額は8,000円、予定は未定です。';
+    await app.handle({...generation, mode, instruction});
+    const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
+    const contract = request.prompt.indexOf('【今回の入力の扱い・指示の優先順位】');
+    assert.ok(contract > request.prompt.indexOf(generatedPrompt));
+    assert.ok(contract > request.prompt.indexOf(fixedPrompt));
+    assert.match(request.prompt, /instruction がユーザー/);
+    assert.match(request.prompt, /生成プロンプトが文体・タスク判定・編集方針を定める主プロンプト/);
+    assert.doesNotMatch(request.prompt, /文体・編集方針は「常に使う追加指示」を優先/);
+    const context = JSON.parse(request.prompt.slice(request.prompt.lastIndexOf('\n\n') + 2));
+    assert.equal(context.instruction, instruction);
+    assert.equal(app.data.promptProfile.generatedPrompt, generatedPrompt);
+    assert.equal(app.data.promptProfile.fixedPrompt, fixedPrompt);
+    assert.equal(app.data.promptProfile.locked, true);
+    assertPortsClosed(app);
+  }
+});
 
 test('model listing is limited to settings and sends no ticket content or API key', async () => {
   const app = background({native: message => ({id: message.id, ok: true, models: [{id: 'model-one', name: 'Model One'}]})});
@@ -491,6 +613,8 @@ test('prompt settings are restricted to the options page and never reveal the Ba
   assert.equal(initial.profile.locked, false);
   assert.equal(initial.profile.revision, 0);
   assert.equal(initial.defaultFixedPrompt, defaultFixedPrompt);
+  assert.equal(initial.defaultGeneratedPrompt, defaultGeneratedPrompt);
+  assert.equal(initial.profile.generatedPrompt, defaultGeneratedPrompt);
   assert.equal(initial.profile.fixedPrompt, defaultFixedPrompt);
   assert.ok(!JSON.stringify(initial).includes('secret-backlog-key'));
   const saved = await app.handle({type: 'SAVE_PROMPT_PROFILE', profile: {...registeredProfile, locked: true, revision: 0}}, optionsSender);
@@ -499,7 +623,8 @@ test('prompt settings are restricted to the options page and never reveal the Ba
   assert.match(saved.effectivePrompt, /本人の情報（宛先ではありません）/);
   assert.ok(saved.effectivePrompt.includes(registeredProfile.profileUrl));
   assert.ok(saved.effectivePrompt.includes(registeredProfile.generatedPrompt));
-  assert.ok(saved.effectivePrompt.endsWith(registeredProfile.fixedPrompt));
+  assert.ok(saved.effectivePrompt.includes(registeredProfile.fixedPrompt));
+  assert.ok(saved.effectivePrompt.indexOf('【今回の入力の扱い・指示の優先順位】') > saved.effectivePrompt.indexOf(registeredProfile.fixedPrompt));
   await assert.rejects(app.handle({type: 'SAVE_PROMPT_PROFILE', profile: {...registeredProfile, revision: 0}}, optionsSender), /更新/);
   assert.equal(app.ports.length, 0);
   assert.equal(app.calls.length, 0);
@@ -518,24 +643,30 @@ test('both reply modes apply the saved identity, generated prompt and permanent 
   }
 });
 
-test('both reply modes use the built-in writing default for previously empty settings and respect later custom or empty saves', async () => {
-  for (const mode of ['chat', 'agent']) {
-    const app = background({settings: {promptProfile: {fixedPrompt: '', revision: 0}}});
+test('both providers and modes use the primary writing prompt exactly once with optional empty or custom additions', async () => {
+  for (const provider of ['copilot', 'codex']) for (const mode of ['chat', 'agent']) {
+    const app = background({settings: {provider, promptProfile: {fixedPrompt: '', revision: 0}}});
     const initial = await app.handle({type: 'GET_PROMPT_PROFILE'}, optionsSender);
-    assert.equal(initial.profile.fixedPrompt, defaultFixedPrompt);
-    assert.ok(initial.effectivePrompt.endsWith(defaultFixedPrompt));
-    await app.handle({...generation, mode});
+    assert.equal(initial.profile.fixedPrompt, '');
+    assert.equal(initial.profile.generatedPrompt, defaultGeneratedPrompt);
+    assert.equal(initial.effectivePrompt.split(defaultGeneratedPrompt).length, 2);
+    assert.ok(!initial.effectivePrompt.includes('常に使う追加指示（利用者独自'));
+    await app.handle({...generation, provider, mode});
     const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
-    assert.ok(request.prompt.includes(defaultFixedPrompt));
+    assert.equal(request.prompt.split(defaultGeneratedPrompt).length, 2);
+    assert.match(request.prompt, /宛名・@名前・敬称・CC行をそのまま保持/);
+    assert.match(request.prompt, /完成した文面の全文だけが入力され/);
     assert.ok(!request.prompt.includes('secret-backlog-key'));
     const custom = await app.handle({type: 'SAVE_PROMPT_PROFILE', profile: {fixedPrompt: '個別の文体指示', revision: 0}}, optionsSender);
     assert.equal(custom.profile.fixedPrompt, '個別の文体指示');
-    assert.ok(!custom.effectivePrompt.includes(defaultFixedPrompt));
-    assert.equal(custom.defaultFixedPrompt, defaultFixedPrompt);
+    assert.equal(custom.effectivePrompt.split(defaultGeneratedPrompt).length, 2);
+    assert.ok(custom.effectivePrompt.indexOf('個別の文体指示') > custom.effectivePrompt.indexOf(defaultGeneratedPrompt));
+    assert.equal(custom.defaultFixedPrompt, '');
     await app.handle({type: 'SAVE_PROMPT_PROFILE', profile: {fixedPrompt: '', revision: 1}}, optionsSender);
     const empty = await app.handle({type: 'GET_PROMPT_PROFILE'}, optionsSender);
     assert.equal(empty.profile.fixedPrompt, '');
-    assert.ok(!empty.effectivePrompt.includes(defaultFixedPrompt));
+    assert.equal(empty.effectivePrompt.split(defaultGeneratedPrompt).length, 2);
+    assert.ok(!empty.effectivePrompt.includes('個別の文体指示'));
     assertPortsClosed(app);
   }
 });
@@ -558,7 +689,9 @@ test('manual prompt generation fetches only public guides and uses the saved AI 
   assert.ok(request.prompt.includes(registeredProfile.displayName));
   assert.ok(request.prompt.includes(registeredProfile.profileUrl));
   assert.ok(!request.prompt.includes(registeredProfile.fixedPrompt), 'permanent instructions are not rewritten by the generator');
-  assert.equal(result.profile.generatedPrompt, '新しく生成した共通指示');
+  assert.ok(request.prompt.includes(defaultGeneratedPrompt));
+  assert.equal(result.profile.generatedPrompt, `${defaultGeneratedPrompt}\n\n【本人情報・Backlog公式ガイドの補足】\n新しく生成した共通指示`);
+  assert.equal(result.effectivePrompt.split(defaultGeneratedPrompt).length, 2);
   assert.equal(result.profile.fixedPrompt, registeredProfile.fixedPrompt);
   assert.equal(result.profile.sources.length, 5);
   assert.equal(result.profile.status.state, 'success');
