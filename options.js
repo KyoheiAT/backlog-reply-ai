@@ -1,7 +1,7 @@
 const ids = ['backlogKey', 'backlogSpaceUrl', 'provider', 'copilotModel', 'codexModel', 'maxComments', 'excludeLatestOwnComment'];
 const providers = ['copilot', 'codex'];
 const manualOption = '@manual';
-const modelPattern = /^[a-zA-Z0-9._:/-]{0,100}$/;
+const modelPattern = /^(?:[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99})?$/;
 const status = document.getElementById('status');
 const modelState = Object.fromEntries(providers.map(provider => [provider, {
   value: '', manual: false, manualValue: '', models: [], attempted: false, loading: false, error: '', requestVersion: 0
@@ -39,7 +39,7 @@ async function loadFormatting(refresh = false) {
       output.textContent = `スペースの記法：${label}。返信時は対象プロジェクトの設定を優先します。`;
       output.className = 'success';
     } else {
-      output.textContent = formatting.message || (formatting.status === 'unconfigured' ? 'スペースURLが未設定です。プロフィールURLを登録するか、Backlogの課題を開いてください。' : '記法設定を確認できませんでした。');
+      output.textContent = formatting.message || (formatting.status === 'unconfigured' ? 'BacklogスペースURLが未設定です。APIキーを発行したスペースのURLを保存してください。' : '記法設定を確認できませんでした。');
       output.className = formatting.status === 'error' ? 'error' : 'note';
     }
     const checkedAt = new Date(formatting.checkedAt);
@@ -197,9 +197,10 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
       excludeLatestOwnComment: document.getElementById('excludeLatestOwnComment').checked === true
     };
     if (!settings.backlogKey) throw new Error('Backlog APIキーを入力してください。');
+    if (!settings.backlogSpaceUrl) throw new Error('APIキーを発行したBacklogスペースURLを入力してください（例：https://your-space.backlog.com）。');
     for (const provider of providers) {
       const value = modelState[provider].value;
-      if (!modelPattern.test(value)) throw new Error(`${provider === 'copilot' ? 'Copilot' : 'Codex'}のモデルIDは100文字以内の半角英数字と . _ : / - で指定してください。`);
+      if (!modelPattern.test(value)) throw new Error(`${provider === 'copilot' ? 'Copilot' : 'Codex'}のモデルIDは100文字以内の半角英数字と . _ : / - で指定してください（先頭は英数字）。`);
       settings[`${provider}Model`] = value;
     }
     await chrome.storage.local.set(settings);

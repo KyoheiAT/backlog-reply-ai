@@ -164,6 +164,17 @@
     // line of the generated text (and no remaining draft) to be present.
     return value.replace(/\u00a0/g, ' ').replace(/\n+/g, '\n').trim();
   }
+  // Issue text can try to make the model add links or image beacons. Hosts that
+  // are neither in the user's own instruction nor this space need confirmation.
+  function unexpectedHosts(text, instruction) {
+    const hosts = value => [...String(value).matchAll(/(?:https?:|[(<"'=]\s*)\/\/([^\s\/?#<>"'()[\]{}|\\^`]+)/gi)].map(([, raw]) => {
+      // Japanese text often follows a URL directly; keep only its ASCII authority.
+      const authority = (raw.match(/^[\x21-\x7e]+/)?.[0] || raw).replace(/[^\p{L}\p{N}]+$/u, '');
+      try {return new URL(`https://${authority}`).hostname;} catch {return '解析できないURL';}
+    });
+    const trusted = new Set([location.hostname.toLowerCase(), ...hosts(instruction)]);
+    return [...new Set(hosts(text))].filter(host => !trusted.has(host));
+  }
   async function setEditorValue(editor, value, assertCurrent) {
     value = String(value).replace(/\r\n?/g, '\n');
     assertCurrent();
@@ -329,7 +340,7 @@
     try {return await operation;} finally {if (settingsPending === operation) settingsPending = null;}
   }
   function reconnectOnReturn() {
-    if (disposed || task || document.visibilityState === 'hidden' || performance.now() - lastReconnectAt < 15000) return;
+    if (disposed || task || !issueKey() || document.visibilityState === 'hidden' || performance.now() - lastReconnectAt < 15000) return;
     lastReconnectAt = performance.now();
     void refreshSettings().catch(error => {if (!disposed && !task) setStatus(location.pathname, error.message, 'error');});
   }
@@ -457,6 +468,13 @@
         draft.resultMode = result.mode === 'agent' ? 'agent' : currentTask.mode;
         draft.toolCalls = Number.isInteger(result.toolCalls) && result.toolCalls >= 0 ? result.toolCalls : null;
         setStatus(currentTask.path, '生成文を受け取りました。コメント入力欄への反映を準備しています。');
+        const hosts = unexpectedHosts(result.text, instruction);
+        if (hosts.length) {
+          setStatus(currentTask.path, '生成文に外部URLが含まれています。確認ダイアログの操作を待っています。');
+          if (!confirm(`生成文に、今回の入力にも現在のBacklogスペースにもないURL（${hosts.slice(0, 3).join('、')}${hosts.length > 3 ? ' ほか' : ''}）が含まれています。課題やコメント内の指示で混入した可能性があります。\nリンクや画像の宛先を確認したうえで、コメント入力欄に反映しますか？`)) {
+            setStatus(currentTask.path, '外部URLを含むため、生成文の挿入をキャンセルしました。', '', true); return;
+          }
+        }
         const target = findEditor();
         if (!target) throw new Error('コメント入力欄が見つかりません。');
         if ((target.value || target.textContent || '').trim()) {
@@ -477,7 +495,7 @@
         };
         await setEditorValue(target, result.text, assertCurrentEditor);
         assertCurrentEditor();
-        setStatus(currentTask.path, `${providerLabel(result.provider)}の生成文を挿入しました（参照コメント ${result.commentsUsed} 件）。確認して手動で投稿してください。`, 'ok', true);
+        setStatus(currentTask.path, `${providerLabel(result.provider)}の生成文を挿入しました（参照コメント ${result.commentsUsed} 件）。${hosts.length ? '外部URLの宛先も含めて' : ''}確認して手動で投稿してください。`, 'ok', true);
       } catch (error) {
         if (isConnectionError(error)) connectionFailed = true;
         if (!disposed) setStatus(currentTask.path, connectionMessage(error), 'error', true);

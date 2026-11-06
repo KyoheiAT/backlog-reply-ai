@@ -32,22 +32,24 @@
     const pending = new Map();
     let writes = Promise.resolve();
     const timestamp = () => new Date(now()).toISOString();
-    const empty = (origin = '', message = 'スペースURLを設定するか、Backlogの課題画面を開いてください。') =>
+    const empty = (origin = '', message = 'APIキーを発行したBacklogスペースURLを設定画面で保存してください。') =>
       ({origin, spaceName: '', rule: '', checkedAt: '', status: 'unconfigured', message});
-    async function config(explicitOrigin) {
-      const saved = await storage.get(['backlogKey', 'backlogSpaceUrl', 'backlogLastSpaceUrl', 'promptProfile']);
+    async function config(requestedOrigin) {
+      const saved = await storage.get(['backlogKey', 'backlogSpaceUrl']);
       const configured = String(saved.backlogSpaceUrl || '').trim();
-      const origin = explicitOrigin ? spaceOrigin(explicitOrigin)
-        : configured ? spaceOrigin(configured)
-        : spaceOrigin(saved.promptProfile?.profileUrl, true) || spaceOrigin(saved.backlogLastSpaceUrl);
+      // An API key belongs to one space. Never send it to any other origin,
+      // including other Backlog subdomains the user happened to open.
+      const keyOrigin = spaceOrigin(configured);
+      const origin = !requestedOrigin || spaceOrigin(requestedOrigin) === keyOrigin ? keyOrigin : '';
       const apiKey = String(saved.backlogKey || '').trim();
       // Bind cached data to the credential without storing a second copy of the key.
       const bytes = apiKey && await root.crypto.subtle.digest('SHA-256', new TextEncoder().encode(apiKey));
       const fingerprint = bytes ? Array.from(new Uint8Array(bytes), value => value.toString(16).padStart(2, '0')).join('') : '';
-      return {origin, apiKey, fingerprint, invalid: !!configured && !spaceOrigin(configured)};
+      return {origin, apiKey, fingerprint, invalid: !!configured && !keyOrigin, foreign: !!keyOrigin && !origin};
     }
     function unavailable(settings) {
       return empty(settings.origin, settings.invalid ? 'スペースURLを確認してください（HTTPSのBacklogスペースURL）。'
+        : settings.foreign ? 'APIキーを発行したスペース以外のため、記法を確認しません。'
         : !settings.apiKey ? 'Backlog APIキーを設定してください。' : undefined);
     }
     function publicState(record) {
@@ -108,14 +110,11 @@
       pending.set(key, request);
       try {return await request;} finally {if (pending.get(key) === request) pending.delete(key);}
     }
-    async function remember(origin) {
-      const validated = spaceOrigin(origin);
-      if (validated) await storage.set({backlogLastSpaceUrl: validated});
-    }
     async function forReply({origin, issueKey, apiKey, deadline}) {
       const validated = spaceOrigin(origin);
       const projectKey = String(issueKey).replace(/-\d+$/, '').toUpperCase();
       if (!validated || !/^[A-Z0-9_]{1,100}$/.test(projectKey)) throw new Error('返信先のプロジェクトを確認できません。');
+      if ((await config(validated)).origin !== validated) throw new Error('APIキーを発行したBacklogスペース以外には送信しません。');
       const [space, project] = await Promise.all([
         refresh({origin: validated, force: false}),
         read(`${validated}/api/v2/projects/${encodeURIComponent(projectKey)}`, apiKey, Math.min(deadline, now() + 10000)).catch(() => null)
@@ -132,7 +131,7 @@
           ? `返信先 ${projectKey} の出力記法：${rule === 'markdown' ? 'Markdown記法' : 'Backlog記法'}。`
           : '返信先の記法を確認できないため、装飾を控えたプレーンテキストで生成します。'};
     }
-    return Object.freeze({getState, refresh, remember, forReply});
+    return Object.freeze({getState, refresh, forReply});
   }
   root.BacklogFormatting = Object.freeze({create, spaceOrigin, instruction});
 })(globalThis);

@@ -34,10 +34,10 @@
     </div>
     <p class="note">一覧はモデルの候補です。利用可否は契約・組織の設定によります。取得に失敗しても自動選択や直接指定で保存できます。一覧の取得では文章を生成しません。</p>
     <label for="backlogKey">Backlog APIキー</label><input id="backlogKey" type="password" autocomplete="off" required>
-    <p class="note">課題本文・コメントの取得に必要です。Backlogの個人設定で発行できます。Chromeのローカル拡張ストレージに保存し、エージェントモードではPC上のBacklog MCPにも認証用として渡します。AIには送信しません。</p>
-    <label for="backlogSpaceUrl">起動時に確認するBacklogスペースURL（任意）</label>
-    <input id="backlogSpaceUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://your-space.backlog.com" aria-describedby="formattingNote">
-    <p id="formattingNote" class="note">Chrome起動時にスペースの記法設定を取得します。空欄の場合は、保存済みの本人プロフィールURL、最後に開いた課題のスペースの順で自動判定します。返信を作る際は対象プロジェクトの記法設定を確認し、Markdown記法／Backlog記法を使い分けます。</p>
+    <p class="note">課題本文・コメントの取得に必要です。Backlogの個人設定で発行できます。Chromeのローカル拡張ストレージに保存し、下で指定したBacklogスペースにだけ送信します。エージェントモードではPC上のBacklog MCPにも認証用として渡します。AIには送信しません。</p>
+    <label for="backlogSpaceUrl">BacklogスペースURL（APIキーの発行元）</label>
+    <input id="backlogSpaceUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://your-space.backlog.com" aria-describedby="formattingNote" required>
+    <p id="formattingNote" class="note">APIキーはこのスペースにだけ送信します。別のスペースの課題画面では、APIキーを送らずに生成を中止します。Chrome起動時にこのスペースの記法設定を取得し、返信を作る際は対象プロジェクトの記法設定を確認して、Markdown記法／Backlog記法を使い分けます。</p>
     <div class="model-actions"><button id="refreshFormatting" type="button">記法を再確認</button><span id="formattingStatus" class="note model-status" role="status" aria-live="polite"></span></div>
     <p id="formattingDetails" class="note model-status"></p>
     <p class="note">再確認には保存済みのURL・APIキーを使います。編集した場合は、先に「設定を保存」を押してください。記法の取得にAIの利用枠は使いません。</p>

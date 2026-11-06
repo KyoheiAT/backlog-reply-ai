@@ -136,6 +136,18 @@ test('arguments disable action-capable features and live data sources', () => {
   assert.equal(args.at(-1), '-');
 });
 
+test('model IDs are passed as one --model= token and option-like IDs never reach the CLI', async () => {
+  const accepted = setup([loggedIn, child => {child.stdout.end(reply('返信') + complete); child.emit('close', 0);}]);
+  await accepted.generate({prompt: '返信', model: 'gpt-5.1-codex'});
+  assert.ok(accepted.calls[1].args.includes('--model=gpt-5.1-codex'));
+  assert.ok(!accepted.calls[1].args.includes('--model'));
+  for (const model of ['-sdanger-full-access', '--dangerously-bypass-approvals-and-sandbox', '-c', '.hidden', 'bad model']) {
+    const blocked = setup([]);
+    await assert.rejects(blocked.generate({prompt: '返信', model}), /モデルID/, model);
+    assert.equal(blocked.calls.length, 0, model);
+  }
+});
+
 test('prompt purpose generates instructions from supplied references and keeps all CLI safety settings', async () => {
   const body = '本人を投稿者として日本語の返信案を作成してください。';
   const {generate, calls} = setup([loggedIn, child => {child.stdout.end(reply(body) + complete); child.emit('close', 0);}]);

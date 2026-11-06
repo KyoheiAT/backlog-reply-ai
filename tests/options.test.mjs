@@ -9,7 +9,7 @@ const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
 const flush = async () => {for (let i = 0; i < 30; i++) await Promise.resolve();};
 
 function optionsHarness(settings = {}, {deferFormatting = false} = {}) {
-  const data = {backlogKey: 'backlog-key', provider: 'copilot', maxComments: 50, ...settings};
+  const data = {backlogKey: 'backlog-key', backlogSpaceUrl: 'https://example.backlog.com', provider: 'copilot', maxComments: 50, ...settings};
   const saves = [];
   const requests = [];
   const formattingRequests = [];
@@ -181,7 +181,7 @@ test('manual model validation accepts ASCII IDs and rejects spaces, shell charac
   const app = optionsHarness();
   await flush();
   app.pick('copilot', '@manual');
-  for (const invalid of ['bad model', 'bad;command', '日本語', 'a'.repeat(101)]) {
+  for (const invalid of ['bad model', 'bad;command', '日本語', 'a'.repeat(101), '-option', '--dangerously-bypass-approvals-and-sandbox', '/path']) {
     app.type('copilot', invalid);
     await app.save();
     assert.equal(app.saves.length, 0);
@@ -281,11 +281,11 @@ test('space status shows saved rule, origin and check time without generating or
   assert.equal(app.element('refreshFormatting').disabled, false);
 });
 
-test('space URL is optional and normalizes an explicit supported origin', async () => {
+test('space URL is required and normalizes an explicit supported origin', async () => {
   const app = optionsHarness();
   await flush();
   for (const [input, expected] of [
-    ['', ''], [' https://Example.backlog.com/ ', 'https://example.backlog.com'],
+    [' https://Example.backlog.com/ ', 'https://example.backlog.com'],
     ['https://example.backlog.jp', 'https://example.backlog.jp'],
     ['https://example.backlogtool.com', 'https://example.backlogtool.com']
   ]) {
@@ -294,6 +294,14 @@ test('space URL is optional and normalizes an explicit supported origin', async 
     assert.equal(app.saves.at(-1).backlogSpaceUrl, expected);
     assert.equal(app.formattingRequests.at(-1).message.type, 'REFRESH_FORMATTING');
   }
+  const saved = app.saves.length;
+  const refreshes = app.formattingRequests.length;
+  app.element('backlogSpaceUrl').value = '  ';
+  await app.save();
+  assert.equal(app.saves.length, saved);
+  assert.equal(app.formattingRequests.length, refreshes);
+  assert.match(app.element('status').textContent, /APIキーを発行したBacklogスペースURL/);
+  assert.ok(markup.includes('aria-describedby="formattingNote" required>'));
 });
 
 test('invalid or ambiguous space URLs are rejected without saving or requesting a refresh', async () => {

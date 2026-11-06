@@ -61,27 +61,29 @@ test('space URLs accept only HTTPS Backlog tenant origins and optionally strip p
 
 test('unconfigured or invalid settings never make authenticated requests', async () => {
   for (const settings of [{backlogKey: ''}, {backlogSpaceUrl: '', backlogLastSpaceUrl: ''},
-    {backlogSpaceUrl: 'https://evil.test', promptProfile: {profileUrl: `${origin}/user/me`}}]) {
+    {backlogSpaceUrl: 'https://evil.test', promptProfile: {profileUrl: `${origin}/user/me`}},
+    {backlogSpaceUrl: '', backlogLastSpaceUrl: origin, promptProfile: {profileUrl: `${origin}/user/me`}}]) {
     const f = fixture({settings});
     assert.equal((await f.manager.getState()).status, 'unconfigured');
     assert.equal((await f.manager.refresh()).status, 'unconfigured');
+    assert.equal((await f.manager.refresh({origin})).status, 'unconfigured');
     assert.equal(f.reads.length + f.writes.length, 0);
   }
 });
 
-test('configured space has priority, then registered profile, then remembered space', async () => {
-  const profileOrigin = 'https://profile.backlog.jp';
-  const remembered = 'https://recent.backlogtool.com';
-  const f = fixture({settings: {promptProfile: {profileUrl: `${profileOrigin}/user/me`}, backlogLastSpaceUrl: remembered}});
+test('only the configured space receives the key; profile, remembered and other requested spaces never do', async () => {
+  const f = fixture({settings: {promptProfile: {profileUrl: 'https://profile.backlog.jp/user/me'}, backlogLastSpaceUrl: 'https://recent.backlogtool.com'}});
+  assert.equal(f.manager.remember, undefined);
   assert.equal((await f.manager.getState()).origin, origin);
-  f.data.backlogSpaceUrl = '';
-  assert.equal((await f.manager.getState()).origin, profileOrigin);
-  f.data.promptProfile.profileUrl = 'https://evil.test/user/me';
-  assert.equal((await f.manager.getState()).origin, remembered);
-  await f.manager.remember('https://next.backlog.com');
-  assert.equal(f.data.backlogLastSpaceUrl, 'https://next.backlog.com');
-  await f.manager.remember('https://evil.test');
-  assert.equal(f.data.backlogLastSpaceUrl, 'https://next.backlog.com');
+  for (const other of ['https://other.backlog.com', 'https://support-ja.backlog.com', 'https://profile.backlog.jp', 'https://evil.test']) {
+    const state = await f.manager.refresh({origin: other});
+    assert.equal(state.status, 'unconfigured', other);
+    assert.equal(state.origin, '', other);
+    assert.match(state.message, /発行したスペース以外/, other);
+  }
+  assert.equal(f.reads.length + f.writes.length, 0);
+  assert.equal((await f.manager.refresh({origin: 'https://EXAMPLE.backlog.com/'})).status, 'ready');
+  assert.deepEqual(f.reads.map(read => read.url), [`${origin}/api/v2/space`]);
 });
 
 test('space refresh caches confirmed format and keeps authentication fingerprints private', async () => {
@@ -196,16 +198,17 @@ test('a response using the old key cannot overwrite a new-key cache', async () =
   assert.equal(f.writes.length, 1);
 });
 
-test('multiple space caches remain distinct and are bounded to eight entries', async () => {
+test('caches stay distinct per configured space and are bounded to eight entries', async () => {
   const f = fixture({read: async url => ({name: new URL(url).hostname,
     textFormattingRule: url.includes('space0.') ? 'backlog' : 'markdown'})});
-  await Promise.all([f.manager.refresh({origin: 'https://space0.backlog.com'}),
-    f.manager.refresh({origin: 'https://space1.backlog.com'})]);
+  const use = space => {f.data.backlogSpaceUrl = space; return f.manager;};
+  await use('https://space0.backlog.com').refresh();
+  await use('https://space1.backlog.com').refresh();
   assert.equal(f.data.backlogFormattingCache.length, 2);
-  assert.equal((await f.manager.refresh({origin: 'https://space0.backlog.com', force: false})).rule, 'backlog');
-  assert.equal((await f.manager.refresh({origin: 'https://space1.backlog.com', force: false})).rule, 'markdown');
+  assert.equal((await use('https://space0.backlog.com').refresh({force: false})).rule, 'backlog');
+  assert.equal((await use('https://space1.backlog.com').refresh({force: false})).rule, 'markdown');
   assert.equal(f.reads.length, 2);
-  for (let i = 2; i < 10; i++) await f.manager.refresh({origin: `https://space${i}.backlog.com`});
+  for (let i = 2; i < 10; i++) await use(`https://space${i}.backlog.com`).refresh();
   assert.equal(f.data.backlogFormattingCache.length, 8);
   assert.equal(new Set(f.data.backlogFormattingCache.map(state => state.origin)).size, 8);
 });
@@ -294,6 +297,15 @@ test('reply requests reject untrusted origins and project paths before any reque
     const f = fixture();
     await assert.rejects(f.reply(args), /返信先のプロジェクト/);
     assert.equal(f.reads.length, 0);
+  }
+});
+
+test('reply requests for another Backlog space or without a saved space never send the key', async () => {
+  for (const [settings, args] of [[{}, {origin: 'https://other.backlog.com'}], [{}, {origin: 'https://support-ja.backlog.com'}],
+    [{backlogSpaceUrl: '', backlogLastSpaceUrl: origin}, {}]]) {
+    const f = fixture({settings});
+    await assert.rejects(f.reply(args), /APIキーを発行したBacklogスペース以外/);
+    assert.equal(f.reads.length + f.writes.length, 0);
   }
 });
 

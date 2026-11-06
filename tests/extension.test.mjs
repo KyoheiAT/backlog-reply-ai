@@ -21,7 +21,7 @@ const generation = {type: 'GENERATE_REPLY', issueKey: 'TEST-12', provider: 'copi
 const response = (payload, status = 200) => ({ok: status >= 200 && status < 300, status, json: async () => payload});
 
 function background({settings = {}, fetch: handleFetch, native: handleNative, connectError, tabError = false} = {}) {
-  const data = {backlogKey: 'secret-backlog-key', ...settings};
+  const data = {backlogKey: 'secret-backlog-key', backlogSpaceUrl: 'https://example.backlog.com', ...settings};
   const calls = [];
   const nativeMessages = [];
   const updates = [];
@@ -758,18 +758,39 @@ test('formatting settings use only the saved space and never start AI or expose 
   assert.deepEqual((await app.handle({type: 'GET_FORMATTING_STATUS'}, optionsSender)).formatting, result.formatting);
 });
 
-test('first issue visit discovers the space and warms its setting without delaying controls or starting AI', async () => {
-  const app = background();
+test('an issue visit in the saved space warms its setting without delaying controls or starting AI', async () => {
+  const app = background({settings: {backlogLastSpaceUrl: 'https://recent.backlog.com'}});
   const settings = await app.handle({type: 'GET_SETTINGS'});
   assert.equal(settings.backlogKey, undefined);
   await flush();
-  assert.equal(app.data.backlogLastSpaceUrl, 'https://example.backlog.com');
+  assert.equal(app.data.backlogLastSpaceUrl, undefined);
   assert.equal(app.calls.length, 1);
   assert.equal(app.ports.length, 0);
   await app.handle();
   assert.equal(app.calls.filter(call => new URL(call.url).pathname === '/api/v2/space').length, 1);
   assert.equal(app.calls.filter(call => new URL(call.url).pathname === '/api/v2/projects/TEST').length, 1);
   assertPortsClosed(app);
+});
+
+test('the Backlog key is sent only to its saved space, never to other Backlog subdomains', async () => {
+  for (const url of ['https://other.backlog.com/view/TEST-12', 'https://support-ja.backlog.com/view/TEST-12',
+    'https://example.backlog.jp/view/TEST-12']) {
+    const app = background();
+    const from = {...sender, url};
+    assert.equal((await app.handle({type: 'GET_SETTINGS'}, from)).provider, 'copilot');
+    await assert.rejects(app.handle(generation, from), /APIキーを送信せずに中止/);
+    await flush();
+    assert.equal(app.calls.length, 0, url);
+    assert.equal(app.ports.length, 0, url);
+  }
+  const unset = background({settings: {backlogSpaceUrl: '', backlogLastSpaceUrl: 'https://example.backlog.com',
+    promptProfile: {profileUrl: 'https://example.backlog.com/user/me', locked: true}}});
+  await unset.handle({type: 'GET_SETTINGS'});
+  await assert.rejects(unset.handle(), /BacklogスペースURLを保存/);
+  unset.fireStartup();
+  await flush();
+  assert.equal(unset.calls.length, 0);
+  assert.equal(unset.ports.length, 0);
 });
 
 test('Chrome startup refreshes cached space settings even with locked prompts and no registered author', async () => {

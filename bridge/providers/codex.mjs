@@ -89,7 +89,8 @@ export function codexArguments(model, purpose = 'reply') {
   ];
   for (const value of config) args.push('-c', value);
   for (const name of DISABLED_FEATURES) args.push('--disable', name);
-  if (model) args.push('--model', model);
+  // One token keeps a model ID from ever being parsed as another CLI option.
+  if (model) args.push(`--model=${model}`);
   args.push('-');
   return args;
 }
@@ -215,7 +216,7 @@ export function createCodexGenerator({
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('生成する内容が空です。');
     if (!['reply', 'plan', 'prompt'].includes(purpose)) throw new Error('Codexの生成用途が不正です。');
     if (typeof model === 'string') model = model.trim() || undefined;
-    if (model !== undefined && (typeof model !== 'string' || !/^[\w.:-]{1,120}$/.test(model))) {
+    if (model !== undefined && (typeof model !== 'string' || !/^[A-Za-z0-9][\w.:-]{0,119}$/.test(model))) {
       throw new Error('CodexのモデルIDが不正です。');
     }
     if (signal?.aborted) throw abortError();
