@@ -114,7 +114,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
         '.bcr-interactive': new Element('input'), '.bcr-dialogue': new Element('div'), '.bcr-instruction-label': new Element('label'),
         '.bcr-dialogue-controls': new Element('div'), '.bcr-chat-hint': new Element('p'), '.bcr-scope-settings': new Element('div'), '.bcr-reference-settings': new Element('details'),
         '.bcr-dialogue-list': new Element('ol'), '.bcr-empty-dialogue': new Element('p'), '.bcr-candidate-wrap': new Element('div'),
-        '.bcr-draft-log': new Element('div'), '.bcr-candidate': new Textarea(), '.bcr-create-draft': new Element('button'), '.bcr-insert-draft': new Element('button'), '.bcr-clear-dialogue': new Element('button'),
+        '.bcr-draft-log': new Element('div'), '.bcr-draft-instruction': new Textarea(), '.bcr-candidate': new Textarea(), '.bcr-create-draft': new Element('button'), '.bcr-insert-draft': new Element('button'), '.bcr-clear-dialogue': new Element('button'),
         '.bcr-sources': new Element('details'), '.bcr-generate': button, button: toggle,
         '.bcr-progress': new Element('section'), '.bcr-progress-list': new Element('ol'), '.bcr-elapsed': new Element('span'),
         '.bcr-toggle': toggle, '.bcr-body': new Element('div'), '.bcr-heading': new Element('div'), '.bcr-compact-status': new Element('span')
@@ -122,7 +122,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
     }
     set innerHTML(value) {this.staticMarkup = value;}
     querySelector(selector) {return this.controls[selector] || null;}
-    querySelectorAll(selector) {return selector === '.bcr-generate, textarea, select, input' ? [this.controls['.bcr-generate'], this.controls['.bcr-instruction'], this.controls['.bcr-references'], this.controls['.bcr-mode'], this.controls['.bcr-include-project'], this.controls['.bcr-interactive'], this.controls['.bcr-candidate']] : [];}
+    querySelectorAll(selector) {return selector === '.bcr-generate, textarea, select, input' ? [this.controls['.bcr-generate'], this.controls['.bcr-instruction'], this.controls['.bcr-references'], this.controls['.bcr-mode'], this.controls['.bcr-include-project'], this.controls['.bcr-interactive'], this.controls['.bcr-draft-instruction'], this.controls['.bcr-candidate']] : [];}
     remove() {this.isConnected = false; if (root === this) root = null;}
   }
   const editor = editorType === 'contenteditable' ? new Editable() : new Textarea();
@@ -1427,4 +1427,53 @@ test('a full conversation can regenerate the edited draft without dropping histo
   app.type('.bcr-instruction', '上限を超える相談'); await app.submit();
   assert.equal(app.generations.length, 13);
   assert.match(app.control('.bcr-status').textContent, /会話が上限/);
+});
+
+test('draft generation accepts optional direction without sending it as a chat turn', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '状況を教えて'); let pending = app.submit(); await flush(); app.finish({text: '確認できました。'}); await pending;
+  app.type('.bcr-draft-instruction', '簡潔に、丁寧な文体で');
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  const request = app.generations[1].message;
+  assert.match(request.instruction, /文案作成時の追加指示：\n簡潔に、丁寧な文体で/);
+  assert.equal(request.interaction.phase, 'draft');
+  assert.deepEqual(JSON.parse(JSON.stringify(request.interaction.messages)).map(item => item.text), ['状況を教えて', '確認できました。']);
+  app.finish({text: '確認しました。'}, 1); await pending;
+  assert.equal(app.control('.bcr-draft-instruction').value, '簡潔に、丁寧な文体で');
+  app.type('.bcr-draft-instruction', '');
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  assert.equal(app.generations[2].message.instruction, 'これまでのやり取りを踏まえて、投稿する返信文案を作成してください。');
+  app.finish({text: '別の文案'}, 2); await pending;
+});
+
+test('draft direction survives failure, reinjection and issue navigation without crossing issues', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '相談'); let pending = app.submit(); await flush(); app.finish({text: '回答'}); await pending;
+  app.type('.bcr-draft-instruction', '箇条書きで');
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush(); app.finish({ok: false, error: '失敗'}, 1); await pending;
+  assert.equal(app.control('.bcr-draft-instruction').value, '箇条書きで');
+  app.reinject(); await flush(); assert.equal(app.control('.bcr-draft-instruction').value, '箇条書きで');
+  app.navigate('/view/OTHER-1'); assert.equal(app.control('.bcr-draft-instruction').value, '');
+  app.type('.bcr-draft-instruction', '他の課題'); app.navigate('/view/TEST-12');
+  assert.equal(app.control('.bcr-draft-instruction').value, '箇条書きで');
+  app.type('.bcr-draft-instruction', 'x'.repeat(4001));
+  const count = app.generations.length; await app.control('.bcr-create-draft').trigger('click'); await flush();
+  assert.equal(app.generations.length, count); assert.match(app.control('.bcr-status').textContent, /4000文字/);
+  assert.equal(app.control('.bcr-draft-instruction').value.length, 4001);
+});
+
+test('only successful draft directions authorize their explicitly provided URLs', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '相談'); let pending = app.submit(); await flush(); app.finish({text: '回答'}); await pending;
+  app.type('.bcr-draft-instruction', 'https://approved.example/ を掲載');
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush(); app.finish({text: 'ご確認: https://approved.example/'}, 1); await pending;
+  await app.control('.bcr-insert-draft').trigger('click');
+  assert.equal(app.confirmations.length, 0); assert.equal(app.editor.value, 'ご確認: https://approved.example/');
+  app.editor.value = '';
+  app.type('.bcr-draft-instruction', 'https://other.example/ を掲載');
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush(); app.finish({ok: false, error: '失敗'}, 2); await pending;
+  app.type('.bcr-candidate', 'https://other.example/');
+  await app.control('.bcr-insert-draft').trigger('click');
+  assert.ok(app.confirmations.some(message => message.includes('other.example')));
+  assert.equal(app.editor.value, '');
 });

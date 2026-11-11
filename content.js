@@ -6,6 +6,7 @@
   const previousRoot = document.getElementById('bcr-root');
   const restored = previousRoot ? {
     instruction: previousRoot.bcrPendingInstruction ?? previousRoot.querySelector('.bcr-instruction')?.value ?? '',
+    draftInstruction: previousRoot.querySelector('.bcr-draft-instruction')?.value ?? '',
     references: previousRoot.querySelector('.bcr-references')?.value || '',
     mode: previousRoot.querySelector('.bcr-mode')?.value === 'agent' ? 'agent' : 'chat',
     includeCurrentProject: previousRoot.querySelector('.bcr-include-project')?.checked !== false,
@@ -53,13 +54,14 @@
   const tenths = milliseconds => Math.max(0, Math.floor(milliseconds / 100));
   const seconds = value => (value / 10).toFixed(1);
   function getDraft(path) {
-    if (!drafts.has(path)) drafts.set(path, {instruction: '', mode: 'chat', references: '', includeCurrentProject: true, interactive: false, messages: [], userInputs: [], conversationScope: null, candidate: '', candidateVisible: false, sentCandidate: '', candidateActivity: null, failedActivity: null, sources: [], sourcesOpen: false, progress: [], elapsedMs: 0, toolCalls: null, resultMode: 'chat'});
+    if (!drafts.has(path)) drafts.set(path, {instruction: '', draftInstruction: '', candidateInstruction: '', mode: 'chat', references: '', includeCurrentProject: true, interactive: false, messages: [], userInputs: [], conversationScope: null, candidate: '', candidateVisible: false, sentCandidate: '', candidateActivity: null, failedActivity: null, sources: [], sourcesOpen: false, progress: [], elapsedMs: 0, toolCalls: null, resultMode: 'chat'});
     return drafts.get(path);
   }
   if (restored) Object.assign(getDraft(lastPath), restored);
   function saveDraft(root, path) {
     const draft = getDraft(path);
     if (!(task?.path === path && task.phase === 'discuss')) draft.instruction = root.querySelector('.bcr-instruction').value;
+    draft.draftInstruction = root.querySelector('.bcr-draft-instruction').value;
     draft.mode = root.querySelector('.bcr-mode').value === 'agent' ? 'agent' : 'chat';
     draft.references = root.querySelector('.bcr-references').value;
     draft.includeCurrentProject = root.querySelector('.bcr-include-project').checked;
@@ -620,6 +622,8 @@
         <p class="bcr-chat-hint" hidden>Enterで送信、Shift + Enterで改行</p>
         <span class="bcr-status" role="status" aria-live="polite"></span>
         <div class="bcr-dialogue-controls" hidden>
+          <label class="bcr-label" for="bcr-draft-instruction">文案作成時の追加指示（任意）</label>
+          <textarea id="bcr-draft-instruction" class="bcr-draft-instruction" maxlength="4000" placeholder="例：要点を3つにまとめ、丁寧な文体で"></textarea>
           <div class="bcr-dialogue-actions"><button class="bcr-create-draft" type="button">会話から返信文案を作成</button><button class="bcr-clear-dialogue" type="button">会話を最初から</button></div>
           <div class="bcr-draft-log" hidden></div>
           <div class="bcr-candidate-wrap" hidden>
@@ -646,18 +650,19 @@
     const pendingInstruction = task?.path === mountedPath && task.phase === 'discuss' ? draft.instruction : null;
     root.querySelector('.bcr-instruction').value = pendingInstruction === null ? draft.instruction : '';
     if (pendingInstruction !== null) root.bcrPendingInstruction = pendingInstruction;
+    root.querySelector('.bcr-draft-instruction').value = draft.draftInstruction || '';
     root.querySelector('.bcr-mode').value = draft.mode;
     root.querySelector('.bcr-references').value = draft.references;
     root.querySelector('.bcr-include-project').checked = draft.includeCurrentProject;
     root.querySelector('.bcr-interactive').checked = draft.interactive;
-    for (const selector of ['.bcr-instruction', '.bcr-references']) root.querySelector(selector).addEventListener('input', () => {saveDraft(root, mountedPath);});
+    for (const selector of ['.bcr-instruction', '.bcr-draft-instruction', '.bcr-references']) root.querySelector(selector).addEventListener('input', () => {saveDraft(root, mountedPath);});
     root.querySelector('.bcr-mode').addEventListener('change', () => {saveDraft(root, mountedPath); renderState();});
     root.querySelector('.bcr-include-project').addEventListener('change', () => {saveDraft(root, mountedPath); renderModeNote(root);});
     root.querySelector('.bcr-interactive').addEventListener('change', () => {saveDraft(root, mountedPath); renderState();});
     root.querySelector('.bcr-candidate').addEventListener('input', event => {draft.candidate = event.currentTarget.value; root.querySelector('.bcr-insert-draft').disabled = !draft.candidate.trim();});
     root.querySelector('.bcr-clear-dialogue').addEventListener('click', () => {
       if (task || !confirm('この課題の会話と返信文案を消去しますか？')) return;
-      draft.messages = []; draft.userInputs = []; draft.conversationScope = null; draft.candidate = ''; draft.candidateVisible = false; draft.sentCandidate = ''; draft.candidateActivity = null; draft.failedActivity = null; draft.sources = [];
+      draft.messages = []; draft.userInputs = []; draft.draftInstruction = ''; draft.candidateInstruction = ''; root.querySelector('.bcr-draft-instruction').value = ''; draft.conversationScope = null; draft.candidate = ''; draft.candidateVisible = false; draft.sentCandidate = ''; draft.candidateActivity = null; draft.failedActivity = null; draft.sources = [];
       renderState();
     });
     root.querySelector('.bcr-sources').addEventListener('toggle', event => {getDraft(mountedPath).sourcesOpen = event.currentTarget.open;});
@@ -673,7 +678,11 @@
       const interactive = draft.mode === 'agent' && draft.interactive;
       if (!interactive) phase = null;
       if (interactive && !phase) phase = 'discuss';
-      const instruction = phase === 'draft' ? 'これまでのやり取りを踏まえて、投稿する返信文案を作成してください。' : draft.instruction.trim();
+      const draftInstruction = phase === 'draft' ? draft.draftInstruction.trim() : '';
+      if (draftInstruction.length > 4000) {setStatus(location.pathname, '文案作成時の追加指示は4000文字以内で入力してください。', 'error'); return;}
+      const instruction = phase === 'draft'
+        ? 'これまでのやり取りを踏まえて、投稿する返信文案を作成してください。' + (draftInstruction ? `\n\n文案作成時の追加指示：\n${draftInstruction}` : '')
+        : draft.instruction.trim();
       if (!instruction) {setStatus(location.pathname, interactive ? 'メッセージを入力してください。' : '伝えたい内容を入力してください。', 'error'); return;}
       if (phase === 'draft' && draft.instruction.trim()) {setStatus(location.pathname, '入力中のメッセージを送信してから文案を作成してください。', 'error'); return;}
       if (phase === 'draft' && !draft.messages.length) {setStatus(location.pathname, '先にメッセージを送信してください。', 'error'); return;}
@@ -746,6 +755,7 @@
           } else {
             if (result.text.length > 10000) throw new Error('返信文案が長すぎます。会話で短くするよう伝えてから、もう一度作成してください。');
             draft.candidate = result.text;
+            draft.candidateInstruction = draftInstruction;
             draft.candidateVisible = true;
             setStatus(currentTask.path, '返信文案を作成しました。内容を確認・編集してからコメント欄に反映してください。', 'ok', true);
             draft.candidateActivity = {entries: [...draft.progress], elapsedMs: draft.elapsedMs, open: false};
@@ -793,7 +803,7 @@
       task = currentTask;
       try {
         // Context copied from an AI draft is not user-supplied URL evidence.
-        await insertReply(currentTask, {text, provider, commentsUsed: draft.commentsUsed ?? 0}, draft.userInputs.join('\n'));
+        await insertReply(currentTask, {text, provider, commentsUsed: draft.commentsUsed ?? 0}, [...draft.userInputs, draft.candidateInstruction || ''].join('\n'));
       } catch (error) {
         if (!disposed) setStatus(mountedPath, connectionMessage(error), 'error', true);
       } finally {

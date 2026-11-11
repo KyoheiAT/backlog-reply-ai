@@ -1098,3 +1098,16 @@ test('draft regeneration keeps the existing draft as bounded untrusted reference
   assert.equal(invalid.ports.length, 0);
   assertPortsClosed(app);
 });
+
+test('draft-specific direction reaches the agent separately from conversation and untrusted draft', async () => {
+  const app = background();
+  const instruction = 'これまでのやり取りを踏まえて、投稿する返信文案を作成してください。\n\n文案作成時の追加指示：\n短く丁寧にまとめてください。';
+  const interaction = {phase: 'draft', messages: [{role: 'user', text: '修正は完了しました。'}, {role: 'assistant', text: '確認を依頼しますか？'}]};
+  await app.handle({...generation, mode: 'agent', instruction, interaction, referenceDraft: '元の文案'});
+  const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
+  const context = JSON.parse(request.prompt.slice(request.prompt.lastIndexOf('\n\n') + 2));
+  assert.equal(context.instruction, instruction);
+  assert.equal(context.untrustedDraft, '元の文案');
+  assert.deepEqual(JSON.parse(JSON.stringify(request.interaction)), interaction);
+  assertPortsClosed(app);
+});
