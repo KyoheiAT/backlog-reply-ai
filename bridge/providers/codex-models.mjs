@@ -193,7 +193,7 @@ function readCatalog({ invocation, cwd, env, signal, spawnImpl, platform }) {
     });
     signal.addEventListener('abort', onAbort, { once: true });
     send({ id: pendingId, method: 'initialize', params: {
-      clientInfo: { name: 'backlog_ai_reply', title: 'Backlog AI Reply', version: '0.4.0' },
+      clientInfo: { name: 'backlog_ai_reply', title: 'Backlog AI Reply', version: '1.2.0' },
     } });
     if (signal.aborted) onAbort();
   });

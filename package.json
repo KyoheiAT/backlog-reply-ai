@@ -1,6 +1,6 @@
 {
   "name": "backlog-ai-reply",
-  "version": "0.4.0",
+  "version": "1.2.0",
   "license": "MIT",
   "private": true,
   "description": "Backlog reply drafts with local Copilot or Codex sign-in",
