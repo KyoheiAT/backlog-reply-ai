@@ -5,6 +5,7 @@ import {webcrypto, createHash} from 'node:crypto';
 import vm from 'node:vm';
 
 const source = await readFile(new URL('../backlog-formatting.js', import.meta.url), 'utf8');
+const credentialsSource = await readFile(new URL('../backlog-credentials.js', import.meta.url), 'utf8');
 const origin = 'https://example.backlog.com';
 const stamp = Date.parse('2026-10-29T00:00:00Z');
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -31,6 +32,7 @@ function fixture({settings = {}, read: readOverride, initialTime = stamp} = {}) 
     async set(values) {writes.push(clone(values)); Object.assign(data, clone(values));}
   };
   const context = vm.createContext({URL, Date, TextEncoder, crypto: webcrypto});
+  vm.runInContext(credentialsSource, context);
   vm.runInContext(source, context);
   const manager = context.BacklogFormatting.create({storage, now: () => time,
     read: async (url, apiKey, deadline) => {
@@ -336,4 +338,90 @@ test('explicit refresh still reads the server alongside a fresh cache lookup', a
   assert.equal(forced.rule, 'backlog');
   assert.equal(f.reads.length, 2);
   assert.equal((await f.manager.getState()).rule, 'backlog');
+});
+
+function registeredSpaces() {
+  return [
+    {origin, activeKeyId: 'first', keys: [
+      {id: 'first', label: '個人用', apiKey: 'space-one-first'},
+      {id: 'second', label: '業務用', apiKey: 'space-one-second'}
+    ]},
+    {origin: 'https://other.backlog.jp', activeKeyId: 'other', keys: [
+      {id: 'other', label: '別スペース', apiKey: 'space-two-key'}
+    ]}
+  ];
+}
+
+test('registered spaces use their own active key and keep formatting caches separate', async () => {
+  const f = fixture({settings: {backlogSpaces: registeredSpaces()}, read: async (url, apiKey) => ({
+    name: new URL(url).hostname, textFormattingRule: apiKey === 'space-two-key' ? 'backlog' : 'markdown'
+  })});
+  assert.equal((await f.manager.refresh({origin})).rule, 'markdown');
+  const secondOrigin = 'https://other.backlog.jp';
+  assert.equal((await f.manager.refresh({origin: secondOrigin})).rule, 'backlog');
+  assert.deepEqual(f.reads.map(({url, apiKey}) => ({url, apiKey})), [
+    {url: `${origin}/api/v2/space`, apiKey: 'space-one-first'},
+    {url: `${secondOrigin}/api/v2/space`, apiKey: 'space-two-key'}
+  ]);
+  assert.equal((await f.manager.getState({origin})).rule, 'markdown');
+  assert.equal((await f.manager.getState({origin: secondOrigin})).rule, 'backlog');
+  assert.equal(f.data.backlogFormattingCache.length, 2);
+  assert.equal(JSON.stringify(f.data.backlogFormattingCache).includes('space-one-first'), false);
+});
+
+test('switching a registered active key invalidates its cache and ignores in-flight old results', async () => {
+  const gate = deferred();
+  const f = fixture({settings: {backlogSpaces: registeredSpaces()}, read: async (_url, apiKey) =>
+    apiKey === 'space-one-first' ? gate.promise : {textFormattingRule: 'backlog'}});
+  const oldRequest = f.manager.refresh({origin});
+  await ready(() => f.reads.length === 1);
+  f.data.backlogSpaces[0].activeKeyId = 'second';
+  assert.equal((await f.manager.getState({origin})).status, 'unconfigured');
+  assert.equal((await f.manager.refresh({origin, force: false})).rule, 'backlog');
+  gate.resolve({textFormattingRule: 'markdown'});
+  await oldRequest;
+  assert.equal((await f.manager.getState({origin})).rule, 'backlog');
+  assert.equal(f.data.backlogFormattingCache[0].fingerprint, createHash('sha256').update('space-one-second').digest('hex'));
+  assert.equal(f.writes.length, 1);
+});
+
+test('removing a registered space while refreshing cannot persist the response', async () => {
+  const gate = deferred();
+  const f = fixture({settings: {backlogSpaces: registeredSpaces()}, read: () => gate.promise});
+  const pending = f.manager.refresh({origin});
+  await ready(() => f.reads.length === 1);
+  f.data.backlogSpaces.splice(0, 1);
+  gate.resolve({textFormattingRule: 'markdown'});
+  await pending;
+  assert.equal((await f.manager.getState({origin})).status, 'unconfigured');
+  assert.equal(f.writes.length, 0);
+});
+
+test('unknown origins and keys registered only in another space are rejected before network reads', async () => {
+  const f = fixture({settings: {backlogSpaces: registeredSpaces()}});
+  const unknown = 'https://unregistered.backlog.com';
+  assert.equal((await f.manager.refresh({origin: unknown})).status, 'unconfigured');
+  assert.equal((await f.manager.getState({origin: unknown})).status, 'unconfigured');
+  for (const args of [{origin, apiKey: 'space-two-key'},
+    {origin: 'https://other.backlog.jp', apiKey: 'space-one-first'},
+    {origin: unknown, apiKey: 'space-one-first'}]) {
+    await assert.rejects(f.reply(args), /APIキーを発行したBacklogスペース以外/);
+  }
+  assert.equal(f.reads.length + f.writes.length, 0);
+});
+
+test('an empty registry disables legacy credentials for formatting requests', async () => {
+  const f = fixture({settings: {backlogSpaces: []}});
+  assert.equal((await f.manager.getState()).status, 'unconfigured');
+  assert.equal((await f.manager.refresh({origin})).status, 'unconfigured');
+  await assert.rejects(f.reply(), /APIキーを発行したBacklogスペース以外/);
+  assert.equal(f.reads.length + f.writes.length, 0);
+});
+
+test('a reply may finish using a captured key still registered to its original space', async () => {
+  const f = fixture({settings: {backlogSpaces: registeredSpaces()}});
+  f.data.backlogSpaces[0].activeKeyId = 'second';
+  assert.equal((await f.reply({apiKey: 'space-one-first'})).rule, 'markdown');
+  assert.equal(f.reads.find(read => read.url.includes('/projects/')).apiKey, 'space-one-first');
+  assert.equal(f.reads.find(read => read.url.endsWith('/space')).apiKey, 'space-one-second');
 });

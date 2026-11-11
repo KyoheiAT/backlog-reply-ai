@@ -1,4 +1,4 @@
-const ids = ['backlogKey', 'backlogSpaceUrl', 'provider', 'copilotModel', 'codexModel', 'maxComments', 'excludeLatestOwnComment'];
+const ids = [...BacklogCredentials.STORAGE_KEYS, 'provider', 'copilotModel', 'codexModel', 'maxComments', 'excludeLatestOwnComment'];
 const providers = ['copilot', 'codex'];
 const manualOption = '@manual';
 const modelPattern = /^(?:[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99})?$/;
@@ -7,7 +7,88 @@ const modelState = Object.fromEntries(providers.map(provider => [provider, {
   value: '', manual: false, manualValue: '', models: [], attempted: false, loading: false, error: '', requestVersion: 0
 }]));
 let settingsLoaded = false;
+let settingsSaving = false;
 let formattingRequestVersion = 0;
+let backlogSpaces = [];
+let selectedSpaceIndex = -1;
+let selectedKeyId = '';
+let credentialSequence = 0;
+let savedSpaceOrigins = new Set();
+
+function newCredential() {
+  let id;
+  do {id = `key-${Date.now().toString(36)}-${++credentialSequence}`;}
+  while (backlogSpaces.some(space => space.keys.some(key => key.id === id)));
+  return {id, label: '', apiKey: ''};
+}
+
+function credentialFeedback(error) {
+  status.textContent = error ? error.message : '変更は「設定を保存」で適用します。';
+  status.className = error ? 'error' : 'note';
+}
+
+function commitCredential() {
+  const space = backlogSpaces[selectedSpaceIndex];
+  if (!space) return;
+  const origin = normalizeSpaceUrl(document.getElementById('backlogSpaceUrl').value);
+  if (!origin) throw new Error('APIキーを発行したBacklogスペースURLを入力してください（例：https://your-space.backlog.com）。');
+  if (backlogSpaces.some((entry, index) => index !== selectedSpaceIndex && entry.origin === origin)) {
+    throw new Error('このスペースは登録済みです。スペース一覧から選び、「APIキーを追加」で登録してください。');
+  }
+  if (space.origin && space.origin !== origin) throw new Error('登録済みのスペースURLは変更できません。別のスペースは「スペースを追加」で登録してください。');
+  const key = space.keys.find(entry => entry.id === selectedKeyId);
+  const apiKey = document.getElementById('backlogKey').value.trim();
+  if (!apiKey || /[\u0000-\u001f\u007f]/.test(apiKey)) throw new Error('有効なBacklog APIキーを入力してください。');
+  if (space.keys.some(entry => entry.id !== selectedKeyId && entry.apiKey === apiKey)) throw new Error('このAPIキーはすでに同じスペースに登録されています。');
+  const label = document.getElementById('backlogKeyLabel').value.trim();
+  if (label.length > 100) throw new Error('APIキーの名前は100文字以内で入力してください。');
+  space.origin = origin;
+  key.apiKey = apiKey;
+  key.label = label || `APIキー ${space.keys.indexOf(key) + 1}`;
+  space.activeKeyId = selectedKeyId;
+}
+
+function renderCredentials() {
+  const select = document.getElementById('backlogSpaceSelect');
+  select.replaceChildren();
+  if (!backlogSpaces.length) addOption(select, '', 'スペースを追加してください');
+  backlogSpaces.forEach((space, index) => addOption(select, String(index), space.origin || '新しいスペース（未入力）'));
+  select.value = selectedSpaceIndex < 0 ? '' : String(selectedSpaceIndex);
+  select.disabled = !backlogSpaces.length;
+  const space = backlogSpaces[selectedSpaceIndex];
+  document.getElementById('backlogCredentialFields').hidden = !space;
+  document.getElementById('removeBacklogSpace').disabled = !space;
+  for (const id of ['backlogSpaceUrl', 'backlogKey', 'backlogKeyLabel', 'backlogKeySelect', 'addBacklogKey', 'removeBacklogKey']) {
+    document.getElementById(id).disabled = !space;
+  }
+  const keySelect = document.getElementById('backlogKeySelect');
+  keySelect.replaceChildren();
+  if (space) {
+    selectedKeyId = space.activeKeyId;
+    space.keys.forEach((key, index) => addOption(keySelect, key.id, key.label || `APIキー ${index + 1}`));
+    keySelect.value = selectedKeyId;
+  }
+  const key = space?.keys.find(entry => entry.id === selectedKeyId);
+  document.getElementById('backlogSpaceUrl').value = space?.origin || '';
+  document.getElementById('backlogSpaceUrl').readOnly = !!space?.origin;
+  document.getElementById('backlogKeyLabel').value = key?.label || '';
+  document.getElementById('backlogKey').value = key?.apiKey || '';
+}
+
+function editCredentials(action, {commit = true} = {}) {
+  if (!settingsLoaded || settingsSaving) return;
+  try {
+    if (commit) commitCredential();
+    action();
+    renderCredentials();
+    credentialFeedback();
+    void loadFormatting();
+  } catch (error) {
+    document.getElementById('backlogSpaceSelect').value = String(selectedSpaceIndex);
+    document.getElementById('backlogKeySelect').value = selectedKeyId;
+    credentialFeedback(error);
+  }
+}
 
 function normalizeSpaceUrl(value) {
   const text = value.trim();
@@ -27,8 +108,13 @@ async function loadFormatting(refresh = false) {
   output.className = 'note';
   output.textContent = refresh ? '保存済みのスペースの記法を確認しています…' : '記法設定を読み込んでいます…';
   details.textContent = '';
+  const origin = backlogSpaces[selectedSpaceIndex]?.origin;
+  if (!origin || !savedSpaceOrigins.has(origin)) {
+    output.textContent = 'スペースとAPIキーを保存すると、記法を確認できます。';
+    return;
+  }
   try {
-    const result = await chrome.runtime.sendMessage({type: refresh ? 'REFRESH_FORMATTING' : 'GET_FORMATTING_STATUS'});
+    const result = await chrome.runtime.sendMessage({type: refresh ? 'REFRESH_FORMATTING' : 'GET_FORMATTING_STATUS', origin});
     if (version !== formattingRequestVersion) return;
     if (!result?.ok) throw new Error(result?.error || '記法設定を確認できませんでした。');
     const formatting = result.formatting;
@@ -98,6 +184,7 @@ function renderModelPicker(provider) {
 }
 
 async function loadModels(provider, force = false) {
+  if (settingsSaving) return;
   const state = modelState[provider];
   if (!force && (state.attempted || state.loading)) return;
   const version = ++state.requestVersion;
@@ -131,6 +218,7 @@ async function loadModels(provider, force = false) {
 }
 
 function showProvider() {
+  if (settingsSaving) return;
   const provider = document.getElementById('provider').value;
   document.getElementById('copilotFields').hidden = provider !== 'copilot';
   document.getElementById('codexFields').hidden = provider !== 'codex';
@@ -140,8 +228,16 @@ function showProvider() {
 async function initialize() {
   await chrome.storage.local.remove(['claudeKey', 'model']);
   const settings = await chrome.storage.local.get(ids);
-  document.getElementById('backlogKey').value = settings.backlogKey || '';
-  document.getElementById('backlogSpaceUrl').value = settings.backlogSpaceUrl || '';
+  backlogSpaces = BacklogCredentials.list(settings);
+  savedSpaceOrigins = new Set(backlogSpaces.map(space => space.origin));
+  if (!backlogSpaces.length && !Array.isArray(settings.backlogSpaces)) {
+    const key = newCredential();
+    // Preserve a previously entered key even when the legacy URL needs fixing.
+    key.apiKey = typeof settings.backlogKey === 'string' ? settings.backlogKey.trim() : '';
+    backlogSpaces.push({origin: '', keys: [key], activeKeyId: key.id});
+  }
+  selectedSpaceIndex = backlogSpaces.length ? 0 : -1;
+  renderCredentials();
   document.getElementById('provider').value = settings.provider === 'codex' ? 'codex' : 'copilot';
   for (const provider of providers) {
     const state = modelState[provider];
@@ -159,10 +255,41 @@ async function initialize() {
 }
 initialize().catch(error => {status.textContent = `設定を読み込めませんでした: ${error.message}`; status.className = 'error';});
 
+document.getElementById('backlogSpaceSelect').addEventListener('change', event => {
+  const index = Number(event.currentTarget.value);
+  editCredentials(() => {selectedSpaceIndex = index;});
+});
+document.getElementById('addBacklogSpace').addEventListener('click', () => editCredentials(() => {
+  const key = newCredential();
+  backlogSpaces.push({origin: '', keys: [key], activeKeyId: key.id});
+  selectedSpaceIndex = backlogSpaces.length - 1;
+}));
+document.getElementById('removeBacklogSpace').addEventListener('click', () => editCredentials(() => {
+  backlogSpaces.splice(selectedSpaceIndex, 1);
+  selectedSpaceIndex = backlogSpaces.length ? Math.min(selectedSpaceIndex, backlogSpaces.length - 1) : -1;
+}, {commit: false}));
+document.getElementById('backlogKeySelect').addEventListener('change', event => {
+  const id = event.currentTarget.value;
+  editCredentials(() => {backlogSpaces[selectedSpaceIndex].activeKeyId = id;});
+});
+document.getElementById('addBacklogKey').addEventListener('click', () => editCredentials(() => {
+  const space = backlogSpaces[selectedSpaceIndex];
+  const key = newCredential();
+  space.keys.push(key);
+  space.activeKeyId = key.id;
+}));
+document.getElementById('removeBacklogKey').addEventListener('click', () => editCredentials(() => {
+  const space = backlogSpaces[selectedSpaceIndex];
+  space.keys = space.keys.filter(key => key.id !== selectedKeyId);
+  if (!space.keys.length) space.keys.push(newCredential());
+  space.activeKeyId = space.keys[0].id;
+}, {commit: false}));
+
 document.getElementById('provider').addEventListener('change', showProvider);
 for (const provider of providers) {
   document.getElementById(`${provider}RefreshModels`).addEventListener('click', () => loadModels(provider, true));
   document.getElementById(`${provider}ModelSelect`).addEventListener('change', event => {
+    if (settingsSaving) return;
     const state = modelState[provider];
     state.manual = event.currentTarget.value === manualOption;
     if (state.manual) state.manualValue = state.value;
@@ -170,6 +297,7 @@ for (const provider of providers) {
     renderModelPicker(provider);
   });
   document.getElementById(`${provider}Model`).addEventListener('input', event => {
+    if (settingsSaving) return;
     const state = modelState[provider];
     state.manualValue = event.currentTarget.value;
     state.value = state.manualValue.trim();
@@ -187,30 +315,42 @@ for (const provider of providers) {
 
 document.getElementById('settingsForm').addEventListener('submit', async event => {
   event.preventDefault();
+  if (settingsSaving) return;
   try {
     if (!settingsLoaded) throw new Error('設定を読み込み中です。少し待ってから保存してください。');
+    commitCredential();
     const settings = {
-      backlogKey: document.getElementById('backlogKey').value.trim(),
-      backlogSpaceUrl: normalizeSpaceUrl(document.getElementById('backlogSpaceUrl').value),
+      backlogSpaces,
       provider: document.getElementById('provider').value,
       maxComments: Math.min(100, Math.max(1, Math.floor(Number(document.getElementById('maxComments').value) || 50))),
       excludeLatestOwnComment: document.getElementById('excludeLatestOwnComment').checked === true
     };
-    if (!settings.backlogKey) throw new Error('Backlog APIキーを入力してください。');
-    if (!settings.backlogSpaceUrl) throw new Error('APIキーを発行したBacklogスペースURLを入力してください（例：https://your-space.backlog.com）。');
     for (const provider of providers) {
       const value = modelState[provider].value;
       if (!modelPattern.test(value)) throw new Error(`${provider === 'copilot' ? 'Copilot' : 'Codex'}のモデルIDは100文字以内の半角英数字と . _ : / - で指定してください（先頭は英数字）。`);
       settings[`${provider}Model`] = value;
     }
+    settingsSaving = true;
+    // A disabled fieldset blocks input even when asynchronous model/formatting
+    // callbacks update their controls' individual disabled states during saving.
+    document.getElementById('settingsFields').disabled = true;
+    status.textContent = '保存しています…'; status.className = 'note';
     await chrome.storage.local.set(settings);
-    await chrome.storage.local.remove(['claudeKey', 'model']);
+    await chrome.storage.local.remove(['claudeKey', 'model', 'backlogKey', 'backlogSpaceUrl']);
+    savedSpaceOrigins = new Set(backlogSpaces.map(space => space.origin));
+    renderCredentials();
     status.textContent = '保存しました。Backlogの課題画面で利用できます。'; status.className = 'success';
     void loadFormatting(true);
   } catch (error) {status.textContent = error.message; status.className = 'error';}
+  finally {
+    settingsSaving = false;
+    document.getElementById('settingsFields').disabled = false;
+  }
 });
 
-document.getElementById('refreshFormatting').addEventListener('click', () => loadFormatting(true));
+document.getElementById('refreshFormatting').addEventListener('click', () => {
+  if (!settingsSaving) return loadFormatting(true);
+});
 
 document.getElementById('checkBridge').addEventListener('click', async event => {
   const button = event.currentTarget;

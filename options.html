@@ -4,6 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Backlog AI Reply 設定</title>
   <style>
+    #settingsFields{border:0;padding:0;margin:0;min-width:0}
     body{font:15px/1.7 system-ui,sans-serif;max-width:740px;margin:36px auto;padding:0 24px;color:#17212c;background:#fff}h1{font-size:26px}h2{font-size:19px;margin-top:32px}label{display:block;margin:20px 0 6px;font-weight:600}input,select{width:100%;padding:10px;box-sizing:border-box;border:1px solid #aab2be;border-radius:6px;font:inherit}button{margin-top:20px;background:#245bba;color:#fff;border:0;border-radius:6px;padding:10px 20px;cursor:pointer;font:inherit}button:disabled{opacity:.55;cursor:default}.note{color:#526071}.info{background:#eef5ff;padding:14px;border-radius:8px}.error{color:#ae2636}.success{color:#167548}code{overflow-wrap:anywhere}pre{padding:12px;background:#f3f5f8;white-space:pre-wrap;overflow-wrap:anywhere}p{margin:10px 0}.model-actions{display:flex;align-items:center;gap:12px;margin-top:8px}.model-actions button{flex-shrink:0;margin:0;background:#eaf0fa;color:#245bba;padding:7px 12px;font-size:13px}.model-status{font-size:13px;overflow-wrap:anywhere}.model-description,.model-note{font-size:13px;overflow-wrap:anywhere}[hidden]{display:none!important}@media(max-width:560px){.model-actions{align-items:flex-start;flex-direction:column}}
   </style>
   <style>
@@ -14,6 +15,7 @@
   <h1>Backlog AI Reply 設定</h1>
   <p class="info">AI APIキーは不要です。PC上のローカル接続を通じ、ログイン済みのGitHub CopilotまたはChatGPT Business（Codex）で返信案を作成します。契約の利用枠を消費します。</p>
   <form id="settingsForm">
+    <fieldset id="settingsFields">
     <label for="provider">利用するAI</label>
     <select id="provider"><option value="copilot">GitHub Copilot</option><option value="codex">ChatGPT Business（Codex）</option></select>
     <div id="copilotFields">
@@ -33,11 +35,26 @@
       <div id="codexManualFields" hidden><label for="codexModel">CodexモデルID</label><input id="codexModel" type="text" maxlength="100" autocomplete="off" spellcheck="false" placeholder="モデルIDを入力（空欄で自動選択）" disabled></div>
     </div>
     <p class="note">一覧はモデルの候補です。利用可否は契約・組織の設定によります。取得に失敗しても自動選択や直接指定で保存できます。一覧の取得では文章を生成しません。</p>
-    <label for="backlogKey">Backlog APIキー</label><input id="backlogKey" type="password" autocomplete="off" required>
-    <p class="note">課題本文・コメントの取得に必要です。Backlogの個人設定で発行できます。Chromeのローカル拡張ストレージに保存し、下で指定したBacklogスペースにだけ送信します。エージェントモードではPC上のBacklog MCPにも認証用として渡します。AIには送信しません。</p>
+    <h2>BacklogスペースとAPIキー</h2>
+    <p class="note">スペースごとに複数のAPIキーを登録できます。課題画面のURLに合うスペースを自動で選び、そのスペースで選択したキーを使います。追加・削除・キーの切り替えは「設定を保存」で適用します。</p>
+    <label for="backlogSpaceSelect">設定するスペース</label>
+    <select id="backlogSpaceSelect" aria-describedby="backlogSpaceNote"></select>
+    <div class="model-actions"><button id="addBacklogSpace" type="button">スペースを追加</button><button id="removeBacklogSpace" type="button">このスペースを削除</button></div>
+    <div id="backlogCredentialFields">
     <label for="backlogSpaceUrl">BacklogスペースURL（APIキーの発行元）</label>
     <input id="backlogSpaceUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://your-space.backlog.com" aria-describedby="formattingNote" required>
-    <p id="formattingNote" class="note">APIキーはこのスペースにだけ送信します。別のスペースの課題画面では、APIキーを送らずに生成を中止します。Chrome起動時にこのスペースの記法設定を取得し、返信を作る際は対象プロジェクトの記法設定を確認して、Markdown記法／Backlog記法を使い分けます。</p>
+    <p class="note">登録済みのスペースURLは固定です。別のスペースは「スペースを追加」で登録してください。</p>
+    <label for="backlogKeySelect">このスペースで利用するAPIキー</label>
+    <select id="backlogKeySelect" aria-describedby="backlogKeyNote"></select>
+    <div class="model-actions"><button id="addBacklogKey" type="button">APIキーを追加</button><button id="removeBacklogKey" type="button">このAPIキーを削除</button></div>
+    <p id="backlogKeyNote" class="note">一覧で選択したキーが利用対象です。キーを変えると、そのキーのユーザーとして課題・コメントを取得します。</p>
+    <label for="backlogKeyLabel">APIキーの名前（任意）</label>
+    <input id="backlogKeyLabel" type="text" maxlength="100" autocomplete="off" placeholder="例：業務用アカウント">
+    <label for="backlogKey">Backlog APIキー</label><input id="backlogKey" type="password" autocomplete="off" required>
+    <p class="note">課題本文・コメントの取得に必要です。Backlogの個人設定で発行できます。Chromeのローカル拡張ストレージに保存し、登録したスペースにだけ送信します。エージェントモードではPC上のBacklog MCPにも認証用として渡します。AIには送信しません。</p>
+    </div>
+    <p id="backlogSpaceNote" class="note">未登録のスペースの課題画面では、APIキーを送らずに生成を中止します。既存のAPIキー設定はこの一覧に引き継がれます。</p>
+    <p id="formattingNote" class="note">Chrome起動時に登録済みの各スペースの記法設定を取得します。返信を作る際は対象プロジェクトの設定を確認して、Markdown記法／Backlog記法を使い分けます。</p>
     <div class="model-actions"><button id="refreshFormatting" type="button">記法を再確認</button><span id="formattingStatus" class="note model-status" role="status" aria-live="polite"></span></div>
     <p id="formattingDetails" class="note model-status"></p>
     <p class="note">再確認には保存済みのURL・APIキーを使います。編集した場合は、先に「設定を保存」を押してください。記法の取得にAIの利用枠は使いません。</p>
@@ -46,6 +63,7 @@
     <label class="prompt-checkbox" for="excludeLatestOwnComment"><input id="excludeLatestOwnComment" type="checkbox" aria-describedby="excludeLatestOwnCommentNote">テスト時に直近の自分のコメントを除外する</label>
     <p id="excludeLatestOwnCommentNote" class="note">初期状態はOFFです。ONにすると、現在の課題で自分が最後に投稿した本文のあるコメント1件を、AIに渡す履歴から除外します。その後に別の人が投稿していても、自分の最後のコメントが対象です。本人は保存済みのBacklog APIキーのユーザーで確認し、通常の返信作成・エージェントモードの両方に適用します。Backlog上のコメントは変更しません。</p>
     <button id="save" type="submit">設定を保存</button><p id="status" role="status" aria-live="polite"></p>
+    </fieldset>
   </form>
   <section class="prompt-section" aria-labelledby="promptHeading">
     <h2 id="promptHeading">共通プロンプトと本人情報</h2>
@@ -91,6 +109,7 @@
   <button id="checkBridge" type="button">自動起動と接続をテスト</button><p id="connectionStatus" role="status" aria-live="polite"></p>
   <p class="note">接続テストはローカル接続の起動と通信だけを確認し、終了します。AIへのログイン・利用上限の確認や文章生成は行いません。</p>
   <p class="note">生成時に課題本文・コメント・指示を選択したAIへ送信します。業務データの取り扱い方針を確認して利用してください。コメントは自動投稿しません。</p>
+  <script src="backlog-credentials.js"></script>
   <script src="options.js"></script>
   <script src="prompt-options.js"></script>
 </body>

@@ -35,17 +35,17 @@
     const empty = (origin = '', message = 'APIキーを発行したBacklogスペースURLを設定画面で保存してください。') =>
       ({origin, spaceName: '', rule: '', checkedAt: '', status: 'unconfigured', message});
     async function config(requestedOrigin) {
-      const saved = await storage.get(['backlogKey', 'backlogSpaceUrl']);
+      const saved = await storage.get(BacklogCredentials.STORAGE_KEYS);
+      const credential = BacklogCredentials.resolve(saved, requestedOrigin);
+      const origin = credential?.origin || '';
+      const apiKey = credential?.apiKey || '';
       const configured = String(saved.backlogSpaceUrl || '').trim();
-      // An API key belongs to one space. Never send it to any other origin,
-      // including other Backlog subdomains the user happened to open.
-      const keyOrigin = spaceOrigin(configured);
-      const origin = !requestedOrigin || spaceOrigin(requestedOrigin) === keyOrigin ? keyOrigin : '';
-      const apiKey = String(saved.backlogKey || '').trim();
       // Bind cached data to the credential without storing a second copy of the key.
       const bytes = apiKey && await root.crypto.subtle.digest('SHA-256', new TextEncoder().encode(apiKey));
       const fingerprint = bytes ? Array.from(new Uint8Array(bytes), value => value.toString(16).padStart(2, '0')).join('') : '';
-      return {origin, apiKey, fingerprint, invalid: !!configured && !keyOrigin, foreign: !!keyOrigin && !origin};
+      return {origin, apiKey, fingerprint,
+        invalid: !Array.isArray(saved.backlogSpaces) && !!configured && !spaceOrigin(configured),
+        foreign: !!requestedOrigin && !origin && BacklogCredentials.list(saved).length > 0};
     }
     function unavailable(settings) {
       return empty(settings.origin, settings.invalid ? 'スペースURLを確認してください（HTTPSのBacklogスペースURL）。'
@@ -64,8 +64,9 @@
     }
     async function save(settings, state) {
       const write = writes.then(async () => {
-        const current = await storage.get(['backlogKey', CACHE_KEY]);
-        if (String(current.backlogKey || '').trim() !== settings.apiKey) return;
+        const current = await storage.get([...BacklogCredentials.STORAGE_KEYS, CACHE_KEY]);
+        const credential = BacklogCredentials.resolve(current, settings.origin);
+        if (!credential || credential.apiKey !== settings.apiKey) return;
         const records = Array.isArray(current[CACHE_KEY]) ? current[CACHE_KEY] : [];
         await storage.set({[CACHE_KEY]: [{...state, fingerprint: settings.fingerprint},
           ...records.filter(record => record?.origin !== settings.origin).slice(0, 7)]});
@@ -73,8 +74,8 @@
       writes = write.catch(() => {});
       await write;
     }
-    async function getState() {
-      const settings = await config();
+    async function getState({origin} = {}) {
+      const settings = await config(origin);
       if (!settings.origin || !settings.apiKey) return unavailable(settings);
       const record = await cached(settings);
       return record ? publicState(record) : empty(settings.origin, 'このスペースの記法はまだ確認していません。');
@@ -114,8 +115,10 @@
       const validated = spaceOrigin(origin);
       const projectKey = String(issueKey).replace(/-\d+$/, '').toUpperCase();
       if (!validated || !/^[A-Z0-9_]{1,100}$/.test(projectKey)) throw new Error('返信先のプロジェクトを確認できません。');
-      if ((await config(validated)).origin !== validated) throw new Error('APIキーを発行したBacklogスペース以外には送信しません。');
-      const [space, project] = await Promise.all([
+      const saved = await storage.get(BacklogCredentials.STORAGE_KEYS);
+      const space = BacklogCredentials.list(saved).find(item => item.origin === validated);
+      if (!space?.keys.some(key => key.apiKey === apiKey)) throw new Error('APIキーを発行したBacklogスペース以外には送信しません。');
+      const [spaceState, project] = await Promise.all([
         refresh({origin: validated, force: false}),
         read(`${validated}/api/v2/projects/${encodeURIComponent(projectKey)}`, apiKey, Math.min(deadline, now() + 10000)).catch(() => null)
       ]);
@@ -125,9 +128,9 @@
       // explicit inheritance value can use the space default; failed/unknown
       // project responses must not hide an override by guessing the space rule.
       const rule = validRule(projectRule) ? projectRule
-        : projectRule === 'space' && space.status === 'ready' ? space.rule : '';
+        : projectRule === 'space' && spaceState.status === 'ready' ? spaceState.rule : '';
       return {origin: validated, projectKey, rule, source: validRule(projectRule) ? 'project' : rule ? 'space' : 'unknown',
-        spaceRule: space.rule, checkedAt: timestamp(), message: rule
+        spaceRule: spaceState.rule, checkedAt: timestamp(), message: rule
           ? `返信先 ${projectKey} の出力記法：${rule === 'markdown' ? 'Markdown記法' : 'Backlog記法'}。`
           : '返信先の記法を確認できないため、装飾を控えたプレーンテキストで生成します。'};
     }

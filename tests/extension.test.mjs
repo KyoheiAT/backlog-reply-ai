@@ -8,6 +8,7 @@ const backgroundSource = await readFile(new URL('../background.js', import.meta.
 const promptManagerSource = await readFile(new URL('../prompt-manager.js', import.meta.url), 'utf8');
 const promptDefaultsSource = await readFile(new URL('../prompt-defaults.js', import.meta.url), 'utf8');
 const formattingSource = await readFile(new URL('../backlog-formatting.js', import.meta.url), 'utf8');
+const credentialsSource = await readFile(new URL('../backlog-credentials.js', import.meta.url), 'utf8');
 const recoverySource = await readFile(new URL('../tab-recovery.js', import.meta.url), 'utf8');
 const defaultsContext = vm.createContext({});
 vm.runInContext(promptDefaultsSource, defaultsContext);
@@ -83,7 +84,7 @@ function background({settings = {}, fetch: handleFetch, native: handleNative, co
     crypto: {subtle: {digest: async (_, bytes) => createHash('sha256').update(bytes).digest()}},
     importScripts(...files) {
       for (const file of files) {
-        const scripts = {'prompt-defaults.js': promptDefaultsSource, 'prompt-manager.js': promptManagerSource, 'backlog-formatting.js': formattingSource, 'tab-recovery.js': recoverySource};
+        const scripts = {'prompt-defaults.js': promptDefaultsSource, 'prompt-manager.js': promptManagerSource, 'backlog-credentials.js': credentialsSource, 'backlog-formatting.js': formattingSource, 'tab-recovery.js': recoverySource};
         assert.ok(Object.hasOwn(scripts, file));
         vm.runInContext(scripts[file], context);
       }
@@ -749,7 +750,7 @@ test('formatting settings use only the saved space and never start AI or expose 
   const before = await app.handle({type: 'GET_FORMATTING_STATUS'}, optionsSender);
   assert.equal(before.formatting.status, 'unconfigured');
   assert.equal(app.calls.length, 0);
-  const result = await app.handle({type: 'REFRESH_FORMATTING', origin: 'https://evil.example'}, optionsSender);
+  const result = await app.handle({type: 'REFRESH_FORMATTING'}, optionsSender);
   assert.equal(result.formatting.rule, 'markdown');
   assert.equal(result.formatting.origin, 'https://example.backlog.com');
   assert.equal(app.calls.length, 1);
@@ -770,6 +771,101 @@ test('an issue visit in the saved space warms its setting without delaying contr
   assert.equal(app.calls.filter(call => new URL(call.url).pathname === '/api/v2/space').length, 1);
   assert.equal(app.calls.filter(call => new URL(call.url).pathname === '/api/v2/projects/TEST').length, 1);
   assertPortsClosed(app);
+});
+
+test('registered spaces use their selected keys for every REST request and agent authentication', async () => {
+  const backlogSpaces = [
+    {origin: 'https://example.backlog.com', keys: [
+      {id: 'personal', label: '個人', apiKey: 'example-unused-secret'},
+      {id: 'work', label: '業務', apiKey: 'example-active-secret'}], activeKeyId: 'work'},
+    {origin: 'https://other.backlog.jp', keys: [
+      {id: 'work', label: '別スペース', apiKey: 'other-active-secret'}], activeKeyId: 'work'}
+  ];
+  for (const space of backlogSpaces) for (const mode of ['chat', 'agent']) {
+    const app = background({settings: {backlogSpaces}});
+    const from = {...sender, url: `${space.origin}/view/TEST-12`};
+    const settings = await app.handle({type: 'GET_SETTINGS'}, from);
+    assert.deepEqual(JSON.parse(JSON.stringify(settings)), {provider: 'copilot', maxComments: 50});
+    await app.handle({...generation, mode, references: 'OTHER-2'}, from);
+    const active = space.keys.find(key => key.id === space.activeKeyId);
+    assert.ok(app.calls.length >= 4);
+    assert.ok(app.calls.every(({url}) => new URL(url).origin === space.origin
+      && new URL(url).searchParams.get('apiKey') === active.apiKey));
+    const request = app.nativeMessages.find(({message}) => message.type === 'generate').message;
+    assert.equal(request.backlog?.apiKey, mode === 'agent' ? active.apiKey : undefined);
+    assert.equal(request.backlog?.origin, mode === 'agent' ? space.origin : undefined);
+    for (const secret of ['secret-backlog-key', ...backlogSpaces.flatMap(space => space.keys.map(key => key.apiKey))]) {
+      assert.ok(!request.prompt.includes(secret));
+      assert.ok(!JSON.stringify(settings).includes(secret));
+    }
+    assertPortsClosed(app);
+  }
+});
+
+test('switching a selected key takes effect on the next generation for that space', async () => {
+  const origin = 'https://example.backlog.com';
+  const app = background({settings: {backlogSpaces: [{origin, keys: [
+    {id: 'first', label: '最初', apiKey: 'first-space-secret'},
+    {id: 'next', label: '次', apiKey: 'next-space-secret'}], activeKeyId: 'first'}]}});
+  await app.handle({...generation, mode: 'agent'});
+  assert.ok(app.calls.every(({url}) => new URL(url).searchParams.get('apiKey') === 'first-space-secret'));
+  const previousCalls = app.calls.length;
+  app.data.backlogSpaces[0].activeKeyId = 'next';
+  await app.handle({...generation, mode: 'agent'});
+  assert.ok(app.calls.slice(previousCalls).every(({url}) => new URL(url).searchParams.get('apiKey') === 'next-space-secret'));
+  const requests = app.nativeMessages.filter(({message}) => message.type === 'generate').map(({message}) => message);
+  assert.deepEqual(requests.map(request => request.backlog.apiKey), ['first-space-secret', 'next-space-secret']);
+  assertPortsClosed(app);
+});
+
+test('an empty registry suppresses legacy credentials and unregistered spaces never receive a key', async () => {
+  for (const backlogSpaces of [[], [{origin: 'https://other.backlog.jp', keys: [
+    {id: 'other', label: '別スペース', apiKey: 'other-secret'}], activeKeyId: 'other'}]]) {
+    const app = background({settings: {backlogSpaces}});
+    await app.handle({type: 'GET_SETTINGS'});
+    await assert.rejects(app.handle(), /APIキーを送信せずに中止/);
+    await flush();
+    assert.equal(app.calls.length, 0);
+    assert.equal(app.ports.length, 0);
+  }
+});
+
+test('formatting status selects a registered space without exposing its credentials', async () => {
+  const origin = 'https://other.backlog.jp';
+  const app = background({settings: {backlogSpaces: [
+    {origin: 'https://example.backlog.com', keys: [{id: 'one', label: 'one', apiKey: 'one-secret'}], activeKeyId: 'one'},
+    {origin, keys: [{id: 'two', label: 'two', apiKey: 'two-secret'}], activeKeyId: 'two'}]}});
+  const result = await app.handle({type: 'REFRESH_FORMATTING', origin}, optionsSender);
+  assert.equal(result.formatting.origin, origin);
+  assert.equal(result.formatting.rule, 'markdown');
+  assert.equal(new URL(app.calls[0].url).searchParams.get('apiKey'), 'two-secret');
+  const state = await app.handle({type: 'GET_FORMATTING_STATUS', origin}, optionsSender);
+  assert.deepEqual(state.formatting, result.formatting);
+  for (const type of ['REFRESH_FORMATTING', 'GET_FORMATTING_STATUS']) {
+    const foreign = await app.handle({type, origin: 'https://unregistered.backlog.com'}, optionsSender);
+    assert.equal(foreign.formatting.status, 'unconfigured');
+    assert.ok(!/one-secret|two-secret|fingerprint/.test(JSON.stringify(foreign)));
+  }
+  assert.equal(app.calls.length, 1);
+  assert.equal(app.ports.length, 0);
+  assert.ok(!/one-secret|two-secret|fingerprint/.test(JSON.stringify(result)));
+});
+
+test('Chrome startup refreshes each registered space with its own active credential', async () => {
+  const backlogSpaces = [
+    {origin: 'https://example.backlog.com', keys: [{id: 'one', label: 'one', apiKey: 'one-secret'}], activeKeyId: 'one'},
+    {origin: 'https://other.backlog.jp', keys: [{id: 'two', label: 'two', apiKey: 'two-secret'}], activeKeyId: 'two'}
+  ];
+  const app = background({settings: {backlogSpaces, promptProfile: {locked: true}}});
+  app.fireStartup();
+  await flush();
+  assert.equal(app.calls.length, 2);
+  for (const space of backlogSpaces) {
+    const call = app.calls.find(({url}) => new URL(url).origin === space.origin);
+    assert.equal(new URL(call.url).pathname, '/api/v2/space');
+    assert.equal(new URL(call.url).searchParams.get('apiKey'), space.keys[0].apiKey);
+  }
+  assert.equal(app.ports.length, 0);
 });
 
 test('the Backlog key is sent only to its saved space, never to other Backlog subdomains', async () => {
