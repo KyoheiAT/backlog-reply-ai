@@ -7,6 +7,13 @@
 #bcr-root .bcr-checkbox input{flex:0 0 auto;width:16px;height:16px;margin:3px 0 0;accent-color:#245bba}
 #bcr-root .bcr-checkbox input:disabled{opacity:.65;cursor:default}
 #bcr-root .bcr-checkbox input:focus-visible{outline:2px solid #245bba;outline-offset:2px}
+#bcr-root .bcr-dialogue{margin-top:12px;padding:10px 12px;border:1px solid #d6dce6;border-radius:6px;background:#fff}
+#bcr-root .bcr-dialogue-list{max-height:260px;overflow:auto;list-style:none;margin:8px 0;padding:0}
+#bcr-root .bcr-dialogue-list li{padding:8px 10px;margin:6px 0;background:#f1f5fb;border-radius:6px;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+#bcr-root .bcr-dialogue-list p{white-space:pre-wrap;margin:4px 0 0}
+#bcr-root .bcr-dialogue-actions{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+#bcr-root .bcr-clear-dialogue{background:#edf1f6;color:#34465d;border:1px solid #c3cbd6}
+#bcr-root .bcr-candidate{min-height:120px;margin-bottom:8px}
 #bcr-root .bcr-title{margin:0;min-width:0}
 #bcr-root .bcr-progress{margin-top:12px;padding:10px 12px;border:1px solid #d6dce6;border-radius:6px;background:#fff;font-size:12px;line-height:1.6;cursor:default}
 #bcr-root .bcr-progress-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;font-weight:600}
@@ -32,3 +39,51 @@
 #bcr-root.bcr-docked:not(.bcr-collapsed){max-height:45vh;max-height:45dvh;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
 #bcr-root.bcr-docked:not(.bcr-collapsed) .bcr-header{position:sticky;top:-14px;background:#f7f9fc;z-index:1;padding:8px 0}
 .bcr-comment-clearance{display:block;box-sizing:border-box;flex:none;clear:both;width:100%;height:0;pointer-events:none}
+
+/* Dialogue keeps the conversation, composer, and draft actions together. */
+#bcr-root .bcr-reference-settings{margin:10px 0;border:1px solid #d6dce6;border-radius:6px;background:#fff;padding:8px 10px}
+#bcr-root .bcr-reference-settings summary{cursor:pointer;color:#34465d;font-size:12px;font-weight:600}
+#bcr-root .bcr-reference-settings summary:focus-visible{outline:2px solid #245bba;outline-offset:2px}
+#bcr-root .bcr-scope-settings{margin-top:9px}
+#bcr-root .bcr-composer{display:flex;align-items:flex-end;gap:8px}
+#bcr-root .bcr-composer textarea{min-width:0;flex:1}
+#bcr-root .bcr-status{display:block;margin-top:6px}
+#bcr-root .bcr-status:empty{display:none}
+#bcr-root.bcr-chat-mode .bcr-dialogue{padding:8px;margin:12px 0 4px;background:#fff}
+#bcr-root.bcr-chat-mode .bcr-dialogue-list{min-height:80px;max-height:260px;scrollbar-gutter:stable;margin:0}
+#bcr-root.bcr-chat-mode .bcr-message{width:fit-content;max-width:90%;box-sizing:border-box;padding:8px 10px;margin:6px 0;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+#bcr-root.bcr-chat-mode .bcr-message-user{margin-left:auto;background:#dceafa;color:#172a44}
+#bcr-root.bcr-chat-mode .bcr-message-assistant{margin-right:auto;background:#f1f5fb}
+#bcr-root .bcr-message>strong{display:block;font-size:11px;color:#526071;margin-bottom:3px}
+#bcr-root .bcr-message-user .bcr-message-body{white-space:pre-wrap}
+#bcr-root.bcr-chat-mode .bcr-instruction-label{margin-top:6px}
+#bcr-root.bcr-chat-mode .bcr-instruction{min-height:58px;max-height:180px}
+#bcr-root .bcr-chat-hint{font-size:11px;color:#647386;margin:4px 0 0}
+#bcr-root .bcr-dialogue-controls{margin-top:10px}
+@media(max-width:420px){#bcr-root .bcr-composer{align-items:stretch;flex-direction:column}#bcr-root .bcr-composer button{align-self:flex-end}}
+
+/* Markdown is rendered as DOM nodes; wide tables and code scroll in the bubble. */
+#bcr-root .bcr-message-assistant .bcr-message-body{min-width:0;white-space:normal}
+#bcr-root .bcr-message-assistant .bcr-message-body p{white-space:normal;margin:0 0 8px}
+#bcr-root .bcr-message-assistant .bcr-message-body :is(h1,h2,h3,h4,h5,h6){font-size:1em;line-height:1.4;margin:10px 0 5px;font-weight:700}
+#bcr-root .bcr-message-assistant .bcr-message-body :is(ul,ol){margin:4px 0 8px;padding-left:22px}
+#bcr-root .bcr-message-assistant .bcr-message-body li{width:auto;max-width:none;margin:2px 0;padding:0;background:transparent}
+#bcr-root .bcr-message-assistant .bcr-message-body li p{margin:0}
+#bcr-root .bcr-message-assistant .bcr-message-body blockquote{margin:6px 0;padding:2px 0 2px 9px;border-left:3px solid #91a6c4;color:#43546b}
+#bcr-root .bcr-message-assistant .bcr-message-body :is(pre,.bcr-markdown-table-wrap){max-width:100%;overflow:auto;margin:6px 0}
+#bcr-root .bcr-message-assistant .bcr-message-body pre{padding:8px;border-radius:4px;background:#e5ebf3;white-space:pre}
+#bcr-root .bcr-message-assistant .bcr-message-body code{font:12px/1.5 ui-monospace,monospace}
+#bcr-root .bcr-message-assistant .bcr-message-body table{border-collapse:collapse;font-size:12px}
+#bcr-root .bcr-message-assistant .bcr-message-body :is(th,td){border:1px solid #bdc9d8;padding:5px 8px;text-align:left;vertical-align:top}
+#bcr-root .bcr-message-assistant .bcr-message-body th{background:#e5edf7}
+#bcr-root .bcr-message-assistant .bcr-message-body a{color:#245bba;text-decoration:underline}
+#bcr-root .bcr-message-assistant .bcr-message-body > :last-child{margin-bottom:0}
+
+/* Per-response progress displays only application activity. */
+#bcr-root .bcr-chat-activity{align-self:flex-start;max-width:100%;margin:5px 0;color:#526071;font-size:12px;line-height:1.5}
+#bcr-root .bcr-chat-activity summary{cursor:pointer;font-weight:600}
+#bcr-root .bcr-chat-activity summary:focus-visible{outline:2px solid #245bba;outline-offset:2px}
+#bcr-root .bcr-chat-activity ol{max-height:140px;overflow:auto;margin:5px 0;padding-left:20px}
+#bcr-root .bcr-chat-activity ol li{width:auto;max-width:none;margin:2px 0;padding:0;background:transparent;overflow-wrap:anywhere}
+
+#bcr-root.bcr-chat-mode .bcr-dialogue-list > .bcr-activity-row{width:100%;max-width:100%;margin:0;padding:0;background:transparent}

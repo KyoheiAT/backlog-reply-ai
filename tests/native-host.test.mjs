@@ -641,3 +641,19 @@ test('real host process exchanges health frames and rejects unauthorized caller 
   assert.equal(denied.stdout.length, 0);
   assert.match(denied.stderr, /登録されたChrome拡張/);
 });
+
+test('agent conversation is forwarded with bounded validation and rejected for normal mode', async t => {
+  const backlog = { origin: 'https://example.backlog.com', apiKey: 'private-key', issueKeys: ['TEST-1'], projectKeys: ['TEST'] };
+  const calls = [];
+  const host = setup(t, { generateAgent: async input => { calls.push(input); return { text: '確認します。', sources: [], toolCalls: 0 }; } });
+  const interaction = { phase: 'discuss', messages: [{ role: 'user', text: '状況は？' }] };
+  host.send(request('valid', { mode: 'agent', backlog, interaction }));
+  assert.equal((await host.waitFor(1))[0].ok, true);
+  assert.deepEqual(calls[0].interaction, interaction);
+  host.send(request('bad-role', { mode: 'agent', backlog, interaction: { phase: 'discuss', messages: [{ role: 'system', text: 'x' }] } }));
+  host.send(request('normal', { mode: 'chat', interaction }));
+  const replies = await host.waitFor(3);
+  assert.equal(replies.find(reply => reply.id === 'bad-role').ok, false);
+  assert.equal(replies.find(reply => reply.id === 'normal').ok, false);
+  assert.equal(calls.length, 1);
+});

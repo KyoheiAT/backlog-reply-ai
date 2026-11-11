@@ -1,4 +1,4 @@
-const ids = [...BacklogCredentials.STORAGE_KEYS, 'provider', 'copilotModel', 'codexModel', 'maxComments', 'excludeLatestOwnComment'];
+const ids = [...BacklogCredentials.STORAGE_KEYS, 'provider', 'copilotModel', 'codexModel', 'maxComments', 'excludeLatestOwnComment', 'backlogRevision'];
 const providers = ['copilot', 'codex'];
 const manualOption = '@manual';
 const modelPattern = /^(?:[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99})?$/;
@@ -14,6 +14,8 @@ let selectedSpaceIndex = -1;
 let selectedKeyId = '';
 let credentialSequence = 0;
 let savedSpaceOrigins = new Set();
+let savedInlineSettings = null;
+let credentialRevision = 0;
 
 function newCredential() {
   let id;
@@ -23,7 +25,7 @@ function newCredential() {
 }
 
 function credentialFeedback(error) {
-  status.textContent = error ? error.message : '変更は「設定を保存」で適用します。';
+  status.textContent = error ? error.message : '変更は「スペース・キーを保存」でまとめて適用します。';
   status.className = error ? 'error' : 'note';
 }
 
@@ -82,6 +84,7 @@ function editCredentials(action, {commit = true} = {}) {
     action();
     renderCredentials();
     credentialFeedback();
+    updateInlineSaveButtons();
     void loadFormatting();
   } catch (error) {
     document.getElementById('backlogSpaceSelect').value = String(selectedSpaceIndex);
@@ -181,6 +184,7 @@ function renderModelPicker(provider) {
     : state.attempted ? (state.models.length ? `${state.models.length}件の候補を取得しました。` : 'モデル候補がありません。自動選択または直接指定を利用できます。')
     : '';
   document.getElementById(`${provider}RefreshModels`).disabled = state.loading;
+  updateInlineSaveButtons();
 }
 
 async function loadModels(provider, force = false) {
@@ -223,11 +227,14 @@ function showProvider() {
   document.getElementById('copilotFields').hidden = provider !== 'copilot';
   document.getElementById('codexFields').hidden = provider !== 'codex';
   if (settingsLoaded) void loadModels(provider);
+  updateInlineSaveButtons();
 }
 
 async function initialize() {
   await chrome.storage.local.remove(['claudeKey', 'model']);
   const settings = await chrome.storage.local.get(ids);
+  credentialRevision = settings.backlogRevision === undefined ? 0 : settings.backlogRevision;
+  if (!Number.isSafeInteger(credentialRevision) || credentialRevision < 0) throw new Error('スペース設定の保存番号が不正です。');
   backlogSpaces = BacklogCredentials.list(settings);
   savedSpaceOrigins = new Set(backlogSpaces.map(space => space.origin));
   if (!backlogSpaces.length && !Array.isArray(settings.backlogSpaces)) {
@@ -250,6 +257,7 @@ async function initialize() {
   document.getElementById('extensionId').textContent = chrome.runtime.id;
   document.getElementById('setupCommand').textContent = `npm run setup -- --extension-id ${chrome.runtime.id}`;
   settingsLoaded = true;
+  captureInlineSettings();
   showProvider();
   void loadFormatting();
 }
@@ -310,6 +318,7 @@ for (const provider of providers) {
     note.textContent = state.value && !selectedModel
       ? '指定中のモデルIDは現在の一覧にありません。設定は保持され、そのまま保存できます。' : '';
     note.hidden = !note.textContent;
+    updateInlineSaveButtons();
   });
 }
 
@@ -335,10 +344,10 @@ document.getElementById('settingsForm').addEventListener('submit', async event =
     // callbacks update their controls' individual disabled states during saving.
     document.getElementById('settingsFields').disabled = true;
     status.textContent = '保存しています…'; status.className = 'note';
-    await chrome.storage.local.set(settings);
-    await chrome.storage.local.remove(['claudeKey', 'model', 'backlogKey', 'backlogSpaceUrl']);
+    await persistSettings(settings);
     savedSpaceOrigins = new Set(backlogSpaces.map(space => space.origin));
     renderCredentials();
+    captureInlineSettings();
     status.textContent = '保存しました。Backlogの課題画面で利用できます。'; status.className = 'success';
     void loadFormatting(true);
   } catch (error) {status.textContent = error.message; status.className = 'error';}
@@ -363,3 +372,120 @@ document.getElementById('checkBridge').addEventListener('click', async event => 
   } catch (error) {output.textContent = error.message; output.className = 'error';}
   finally {button.disabled = false;}
 });
+
+async function persistSettings(settings) {
+  const includesCredentials = Object.hasOwn(settings, 'backlogSpaces');
+  const result = await chrome.runtime.sendMessage({type: 'SAVE_SETTINGS', settings,
+    ...(includesCredentials ? {credentialRevision} : {})});
+  if (!result?.ok) throw new Error(result?.error || '設定を保存できませんでした。');
+  if (includesCredentials) {
+    if (!Number.isSafeInteger(result.credentialRevision) || result.credentialRevision !== credentialRevision + 1) {
+      throw new Error('保存結果を確認できません。入力を控えてから設定画面を再読み込みしてください。');
+    }
+    credentialRevision = result.credentialRevision;
+  }
+}
+
+// Inline saves persist only the changed setting. Credentials are a single
+// coherent registry, because a key, its origin and selection must agree.
+const inlineButtons = {
+  provider: ['saveProvider'],
+  copilotModel: ['saveCopilotModel', 'saveCopilotModelManual'],
+  codexModel: ['saveCodexModel', 'saveCodexModelManual'],
+  credentials: ['saveCredentialsSpace', 'saveCredentialsUrl', 'saveCredentialsKey', 'saveCredentialsLabel', 'saveCredentialsValue'],
+  maxComments: ['saveMaxComments'],
+  excludeLatestOwnComment: ['saveExcludeLatestOwnComment']
+};
+function credentialSnapshot() {
+  const spaces = JSON.parse(JSON.stringify(backlogSpaces));
+  const space = spaces[selectedSpaceIndex];
+  if (space) {
+    space.origin = document.getElementById('backlogSpaceUrl').value.trim();
+    space.activeKeyId = selectedKeyId;
+    const key = space.keys.find(entry => entry.id === selectedKeyId);
+    if (key) {
+      key.label = document.getElementById('backlogKeyLabel').value.trim();
+      key.apiKey = document.getElementById('backlogKey').value.trim();
+    }
+  }
+  return JSON.stringify(spaces);
+}
+function inlineValues() {
+  return {
+    provider: document.getElementById('provider').value,
+    copilotModel: modelState.copilot.value,
+    codexModel: modelState.codex.value,
+    credentials: credentialSnapshot(),
+    maxComments: document.getElementById('maxComments').value,
+    excludeLatestOwnComment: document.getElementById('excludeLatestOwnComment').checked === true
+  };
+}
+function captureInlineSettings() {
+  savedInlineSettings = inlineValues();
+  updateInlineSaveButtons();
+}
+function updateInlineSaveButtons() {
+  // initialize() can render model pickers before the saved snapshot exists.
+  if (!savedInlineSettings) return;
+  const current = inlineValues();
+  for (const [group, buttons] of Object.entries(inlineButtons)) {
+    const changed = current[group] !== savedInlineSettings[group];
+    for (const id of buttons) {
+      document.getElementById(id).hidden = !changed;
+      if (changed) document.getElementById(`${id}Status`).textContent = '';
+    }
+  }
+}
+async function saveInlineSetting(group, buttonId) {
+  if (!settingsLoaded || settingsSaving || !savedInlineSettings) return;
+  const output = document.getElementById(`${buttonId}Status`);
+  output.className = 'inline-status';
+  output.textContent = '';
+  try {
+    let value;
+    if (group === 'credentials') {
+      commitCredential();
+      value = JSON.parse(JSON.stringify(backlogSpaces));
+    } else if (group === 'copilotModel' || group === 'codexModel') {
+      value = modelState[group === 'copilotModel' ? 'copilot' : 'codex'].value;
+      if (!modelPattern.test(value)) throw new Error('モデルIDは100文字以内の半角英数字と . _ : / - で指定してください（先頭は英数字）。');
+    } else if (group === 'maxComments') {
+      const raw = document.getElementById('maxComments').value.trim();
+      value = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isInteger(value) || value < 1 || value > 100) throw new Error('1〜100の整数を入力してください。');
+    } else if (group === 'excludeLatestOwnComment') {
+      value = document.getElementById('excludeLatestOwnComment').checked === true;
+    } else if (group === 'provider') {
+      value = document.getElementById('provider').value;
+      if (!providers.includes(value)) throw new Error('利用するAIが不正です。');
+    } else throw new Error('保存する設定が不正です。');
+    settingsSaving = true;
+    document.getElementById('settingsFields').disabled = true;
+    output.textContent = '保存中…';
+    const property = group === 'credentials' ? 'backlogSpaces' : group;
+    await persistSettings({[property]: value});
+    if (group === 'credentials') {
+      savedSpaceOrigins = new Set(backlogSpaces.map(space => space.origin));
+      renderCredentials();
+      savedInlineSettings.credentials = credentialSnapshot();
+      void loadFormatting(true);
+    } else {
+      savedInlineSettings[group] = group === 'maxComments' ? String(value) : value;
+    }
+    updateInlineSaveButtons();
+    output.textContent = '保存しました';
+  } catch (error) {
+    output.textContent = error.message || '保存できませんでした。';
+    output.className = 'inline-status error';
+  } finally {
+    settingsSaving = false;
+    document.getElementById('settingsFields').disabled = false;
+  }
+}
+for (const [group, buttonIds] of Object.entries(inlineButtons)) {
+  for (const id of buttonIds) document.getElementById(id).addEventListener('click', () => saveInlineSetting(group, id));
+}
+for (const id of ['backlogSpaceUrl', 'backlogKeyLabel', 'backlogKey', 'maxComments']) {
+  document.getElementById(id).addEventListener('input', updateInlineSaveButtons);
+}
+document.getElementById('excludeLatestOwnComment').addEventListener('change', updateInlineSaveButtons);

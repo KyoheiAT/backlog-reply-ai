@@ -9,8 +9,9 @@ const markup = await readFile(new URL('../options.html', import.meta.url), 'utf8
 const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
 const flush = async () => {for (let i = 0; i < 30; i++) await Promise.resolve();};
 
-function optionsHarness(settings = {}, {deferFormatting = false, deferSave = false} = {}) {
-  const data = {backlogKey: 'backlog-key', backlogSpaceUrl: 'https://example.backlog.com', provider: 'copilot', maxComments: 50, ...settings};
+function optionsHarness(settings = {}, {deferFormatting = false, deferSave = false, shared = null} = {}) {
+  const data = shared?.data || {backlogKey: 'backlog-key', backlogSpaceUrl: 'https://example.backlog.com', provider: 'copilot', maxComments: 50, ...settings};
+  const queue = shared || {tail: Promise.resolve()};
   const saves = [];
   const requests = [];
   const formattingRequests = [];
@@ -40,6 +41,24 @@ function optionsHarness(settings = {}, {deferFormatting = false, deferSave = fal
   };
   const context = vm.createContext({document, URL, chrome: {
     runtime: {id: extensionId, sendMessage: message => {
+      if (message.type === 'SAVE_SETTINGS') {
+        const operation = queue.tail.then(async () => {
+          const values = JSON.parse(JSON.stringify(message.settings));
+          const credentials = Object.hasOwn(values, 'backlogSpaces');
+          const revision = data.backlogRevision ?? 0;
+          if (credentials && message.credentialRevision !== revision) return {ok: false, error: 'スペースとAPIキーが別の設定画面で更新されました。入力内容を控えてから、この設定画面を再読み込みしてください。'};
+          saves.push(values);
+          if (deferSave) await new Promise((resolve, reject) => saveRequests.push({resolve, reject}));
+          Object.assign(data, values);
+          if (credentials) {
+            data.backlogRevision = revision + 1;
+            delete data.backlogKey; delete data.backlogSpaceUrl;
+          }
+          return {ok: true, ...(credentials ? {credentialRevision: revision + 1} : {})};
+        }).catch(error => ({ok: false, error: error.message}));
+        queue.tail = operation.then(() => {});
+        return operation;
+      }
       if (message.type === 'CHECK_BRIDGE') return Promise.resolve({ok: true});
       if (['GET_FORMATTING_STATUS', 'REFRESH_FORMATTING'].includes(message.type)) {
         return new Promise((resolve, reject) => {
@@ -570,6 +589,7 @@ test('saving locks credential controls and ignores queued edits and repeat submi
   await flush();
   app.element('backlogKeyLabel').value = '保存する名前';
   const saving = app.save();
+  await flush();
   assert.equal(app.saveRequests.length, 1);
   for (const id of ['backlogKey', 'backlogKeyLabel', 'backlogSpaceUrl', 'backlogSpaceSelect',
     'backlogKeySelect', 'addBacklogKey', 'removeBacklogSpace', 'provider', 'save']) {
@@ -619,6 +639,7 @@ test('failed storage writes unlock controls and retain the draft and legacy cred
   app.element('backlogKey').value = 'replacement-key';
   app.element('backlogKeyLabel').value = '入力中の名前';
   const saving = app.save();
+  await flush();
   app.saveRequests[0].reject(new Error('保存先を利用できません。'));
   await saving;
   assert.equal(app.element('backlogKey').matches(':disabled'), false);
@@ -630,9 +651,125 @@ test('failed storage writes unlock controls and retain the draft and legacy cred
   assert.equal(app.data.backlogSpaces, undefined);
   assert.match(app.element('status').textContent, /保存先を利用できません/);
   const retry = app.save();
+  await flush();
   assert.equal(app.saveRequests.length, 2);
   app.saveRequests[1].resolve();
   await retry;
   assert.equal(app.data.backlogSpaces[0].keys[0].apiKey, 'replacement-key');
   assert.equal(app.data.backlogKey, undefined);
+});
+
+test('inline saves appear beside changed fields and save only that setting', async () => {
+  const app = optionsHarness(); await flush();
+  for (const id of ['saveProvider', 'saveCopilotModel', 'saveMaxComments', 'saveExcludeLatestOwnComment', 'saveCredentialsValue']) {
+    assert.equal(app.element(id).hidden, true, id);
+  }
+  app.element('backlogKey').value = '';
+  app.element('backlogKey').dispatch('input');
+  app.element('maxComments').value = '32';
+  app.element('maxComments').dispatch('input');
+  assert.equal(app.element('saveMaxComments').hidden, false);
+  assert.equal(app.element('saveCredentialsValue').hidden, false);
+  await app.element('saveMaxComments').dispatch('click');
+  assert.deepEqual(app.saves.at(-1), {maxComments: 32});
+  assert.equal(app.data.maxComments, 32);
+  assert.equal(app.data.backlogKey, 'backlog-key');
+  assert.equal(app.element('backlogKey').value, '');
+  assert.equal(app.element('saveMaxComments').hidden, true);
+  assert.equal(app.element('saveCredentialsValue').hidden, false);
+  assert.match(app.element('saveMaxCommentsStatus').textContent, /保存しました/);
+});
+
+test('model and provider inline saves are independent and retain other unsaved changes', async () => {
+  const app = optionsHarness(); await flush();
+  app.switch('codex');
+  assert.equal(app.element('saveProvider').hidden, false);
+  app.pick('codex', '@manual');
+  app.type('codex', 'new-model');
+  assert.equal(app.element('saveCodexModelManual').hidden, false);
+  await app.element('saveCodexModelManual').dispatch('click');
+  assert.deepEqual(app.saves.at(-1), {codexModel: 'new-model'});
+  assert.equal(app.data.provider, 'copilot');
+  assert.equal(app.element('saveProvider').hidden, false);
+  await app.element('saveProvider').dispatch('click');
+  assert.deepEqual(app.saves.at(-1), {provider: 'codex'});
+  assert.equal(app.element('saveProvider').hidden, true);
+});
+
+test('credential inline saves persist the registry while leaving other edits pending', async () => {
+  const app = optionsHarness(); await flush();
+  app.element('backlogKey').value = 'changed-key';
+  app.element('backlogKey').dispatch('input');
+  app.element('maxComments').value = '12';
+  app.element('maxComments').dispatch('input');
+  await app.element('saveCredentialsValue').dispatch('click');
+  assert.deepEqual(Object.keys(app.saves.at(-1)), ['backlogSpaces']);
+  assert.equal(app.data.backlogSpaces[0].keys[0].apiKey, 'changed-key');
+  assert.equal(app.data.maxComments, 50);
+  assert.equal(app.data.backlogKey, undefined);
+  assert.equal(app.element('saveCredentialsValue').hidden, true);
+  assert.equal(app.element('saveMaxComments').hidden, false);
+});
+
+test('inline saves validate values near the field and retain the unsaved input', async () => {
+  const app = optionsHarness(); await flush();
+  app.element('maxComments').value = '101'; app.element('maxComments').dispatch('input');
+  await app.element('saveMaxComments').dispatch('click');
+  assert.equal(app.saves.length, 0);
+  assert.match(app.element('saveMaxCommentsStatus').textContent, /1〜100/);
+  assert.equal(app.element('saveMaxComments').hidden, false);
+  app.element('backlogKey').value = ''; app.element('backlogKey').dispatch('input');
+  await app.element('saveCredentialsValue').dispatch('click');
+  assert.equal(app.saves.length, 0);
+  assert.match(app.element('saveCredentialsValueStatus').textContent, /APIキー/);
+  assert.equal(app.element('backlogKey').value, '');
+});
+
+test('inline saves block concurrent writes and global save clears dirty buttons', async () => {
+  const app = optionsHarness({}, {deferSave: true}); await flush();
+  app.element('maxComments').value = '42'; app.element('maxComments').dispatch('input');
+  const pending = app.element('saveMaxComments').dispatch('click'); await flush();
+  assert.equal(app.element('settingsFields').disabled, true);
+  await app.element('saveMaxComments').dispatch('click');
+  assert.equal(app.saves.length, 1);
+  app.saveRequests[0].resolve(); await pending;
+  assert.equal(app.element('settingsFields').disabled, false);
+  assert.equal(app.element('saveMaxComments').hidden, true);
+  app.element('maxComments').value = '43'; app.element('maxComments').dispatch('input');
+  const all = app.save(); await flush();
+  app.saveRequests[1].resolve(); await all;
+  assert.equal(app.element('saveMaxComments').hidden, true);
+});
+
+test('stale settings tabs cannot overwrite newer credentials through inline or full saves', async () => {
+  const shared = {data: {backlogSpaces: registeredSpaces(), provider: 'copilot', maxComments: 50}, tail: Promise.resolve()};
+  const first = optionsHarness({}, {shared});
+  const second = optionsHarness({}, {shared});
+  await flush();
+  click(first, 'addBacklogSpace');
+  first.element('backlogSpaceUrl').value = 'https://new.backlog.com';
+  first.element('backlogSpaceUrl').dispatch('input');
+  first.element('backlogKey').value = 'new-space-key';
+  first.element('backlogKey').dispatch('input');
+  await first.element('saveCredentialsValue').dispatch('click');
+  assert.equal(shared.data.backlogSpaces.length, 3);
+  assert.equal(shared.data.backlogRevision, 1);
+  second.element('backlogKey').value = 'uncommitted-second-tab';
+  second.element('backlogKey').dispatch('input');
+  second.element('maxComments').value = '31';
+  second.element('maxComments').dispatch('input');
+  await second.element('saveCredentialsValue').dispatch('click');
+  assert.match(second.element('saveCredentialsValueStatus').textContent, /別の設定画面/);
+  assert.equal(second.element('backlogKey').value, 'uncommitted-second-tab');
+  assert.equal(second.element('saveCredentialsValue').hidden, false);
+  assert.equal(shared.data.backlogSpaces.length, 3);
+  assert.equal(shared.data.backlogSpaces[2].keys[0].apiKey, 'new-space-key');
+  await second.save();
+  assert.match(second.element('status').textContent, /別の設定画面/);
+  assert.equal(shared.data.backlogSpaces.length, 3);
+  assert.equal(shared.data.maxComments, 50);
+  assert.equal(second.element('maxComments').value, '31');
+  await second.element('saveMaxComments').dispatch('click');
+  assert.equal(shared.data.maxComments, 31);
+  assert.equal(shared.data.backlogSpaces[2].keys[0].apiKey, 'new-space-key');
 });

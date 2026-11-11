@@ -67,7 +67,7 @@ function promptProfileResponse(profile) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!['GENERATE_REPLY', 'GET_SETTINGS', 'CHECK_BRIDGE', 'LIST_MODELS', 'GET_PROMPT_PROFILE', 'SAVE_PROMPT_PROFILE', 'REGENERATE_PROMPT_PROFILE', 'GET_FORMATTING_STATUS', 'REFRESH_FORMATTING'].includes(message?.type)) return;
+  if (!['GENERATE_REPLY', 'GET_SETTINGS', 'SAVE_SETTINGS', 'CHECK_BRIDGE', 'LIST_MODELS', 'GET_PROMPT_PROFILE', 'SAVE_PROMPT_PROFILE', 'REGENERATE_PROMPT_PROFILE', 'GET_FORMATTING_STATUS', 'REFRESH_FORMATTING'].includes(message?.type)) return;
   handleMessage(message, sender).then(result => sendResponse({ok: true, ...result}))
     .catch(error => sendResponse({ok: false, error: error.message || String(error)}));
   return true;
@@ -94,6 +94,26 @@ function normalizeSettings(settings = {}, origin) {
     excludeLatestOwnComment: settings.excludeLatestOwnComment === true,
     maxComments: Number.isFinite(count) && count > 0 ? Math.min(100, Math.max(1, Math.floor(count))) : 50
   };
+}
+
+function validateInteraction(value, mode) {
+  if (value === undefined) return undefined;
+  if (mode !== 'agent' || !value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).some(key => !['phase', 'messages'].includes(key))
+    || !['discuss', 'draft'].includes(value.phase) || !Array.isArray(value.messages) || value.messages.length > 20) {
+    throw new Error('対話内容の形式が不正です。');
+  }
+  let total = 0;
+  const messages = value.messages.map(entry => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || Object.keys(entry).some(key => !['role', 'text'].includes(key))
+      || !['user', 'assistant'].includes(entry.role) || typeof entry.text !== 'string'
+      || !entry.text.trim() || entry.text.length > 4000) throw new Error('対話内容は各4,000文字以内で入力してください。');
+    total += entry.text.length;
+    return {role: entry.role, text: entry.text};
+  });
+  if (total > 24000) throw new Error('対話内容が長すぎます。新しい対話を開始してください。');
+  return {phase: value.phase, messages};
 }
 
 function parseReferences(value, page) {
@@ -193,7 +213,7 @@ async function fetchReferences(targets, page, settings, deadline, report = () =>
 }
 
 // Display application activity, never model reasoning, tool results or raw errors.
-function progressLabel(event) {
+function progressLabel(event, interaction) {
   if (!event || typeof event !== 'object') return '';
   const target = typeof event.target === 'string' && /^[A-Z0-9_]{1,100}(?:-\d{1,11})?$/.test(event.target) ? ` ${event.target}` : '';
   const tools = {get_project: 'プロジェクト情報', get_issues: '課題一覧', get_issue: '課題本文', get_issue_comments: 'コメント'};
@@ -212,6 +232,12 @@ function progressLabel(event) {
     format_retry: 'AIの応答形式を再確認しています。',
     generating: 'AIに返信案を依頼しています。応答を待っています。'
   };
+  if (interaction?.phase === 'discuss') {
+    labels.planning = `AIに問い合わせています${step}。追加調査または回答を待っています。`;
+    labels.drafting = `取得済みの情報から回答を考えています${step}。`;
+    labels.reply_ready = 'AIから回答を受け取りました。接続の終了処理をしています。';
+    labels.duplicate = '同じ条件の取得は省略し、取得済みの情報から回答します。';
+  }
   return Object.hasOwn(labels, event.stage) ? labels[event.stage] : '';
 }
 
@@ -226,9 +252,50 @@ function safeSources(sources, origin) {
   }).map(source => ({title: String(source.title || '参照先').slice(0, 150), url: source.url}));
 }
 
+// Credential registry saves use one service-worker queue so concurrent settings
+// pages cannot both overwrite an older snapshot. The revision and data are
+// committed in the same storage write; unrelated settings can still be saved.
+let settingsSaveQueue = Promise.resolve();
+function saveSettingsSafely(settings, expectedRevision) {
+  const action = async () => {
+    const allowed = new Set(['backlogSpaces', 'provider', 'copilotModel', 'codexModel', 'maxComments', 'excludeLatestOwnComment']);
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)
+      || !Object.keys(settings).length || Object.keys(settings).some(key => !allowed.has(key))) {
+      throw new Error('保存する設定が不正です。');
+    }
+    const includesCredentials = Object.hasOwn(settings, 'backlogSpaces');
+    const changes = {...settings};
+    let revision;
+    if (includesCredentials) {
+      if (!Array.isArray(settings.backlogSpaces) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+        throw new Error('スペースとAPIキーの設定が不正です。');
+      }
+      const saved = await chrome.storage.local.get(['backlogRevision']);
+      const current = saved.backlogRevision === undefined ? 0 : saved.backlogRevision;
+      if (!Number.isSafeInteger(current) || current < 0) throw new Error('スペース設定の保存番号が不正です。');
+      if (expectedRevision !== current) throw new Error('スペースとAPIキーが別の設定画面で更新されました。入力内容を控えてから、この設定画面を再読み込みしてください。');
+      if (current >= Number.MAX_SAFE_INTEGER) throw new Error('スペース設定の保存番号が上限に達しました。');
+      revision = current + 1;
+      changes.backlogRevision = revision;
+    }
+    await chrome.storage.local.set(changes);
+    // A registry, even an empty one, takes precedence over legacy fields. A
+    // failed cleanup must not make a completed save look like it failed.
+    if (includesCredentials) await chrome.storage.local.remove(['backlogKey', 'backlogSpaceUrl']).catch(() => {});
+    return includesCredentials ? {credentialRevision: revision} : {};
+  };
+  const result = settingsSaveQueue.then(action);
+  settingsSaveQueue = result.catch(() => {});
+  return result;
+}
+
 async function handleMessage(message, sender) {
   if (sender.id !== chrome.runtime.id) throw new Error('拡張機能の呼び出し元を確認できません。');
   await settingsReady;
+  if (message.type === 'SAVE_SETTINGS') {
+    if (sender.url !== chrome.runtime.getURL('options.html')) throw new Error('設定画面から実行してください。');
+    return saveSettingsSafely(message.settings, message.credentialRevision);
+  }
   if (['GET_FORMATTING_STATUS', 'REFRESH_FORMATTING'].includes(message.type)) {
     if (sender.url !== chrome.runtime.getURL('options.html')) throw new Error('設定画面から実行してください。');
     return {formatting: message.type === 'REFRESH_FORMATTING'
@@ -292,6 +359,12 @@ async function handleMessage(message, sender) {
   if (!instruction || instruction.length > 10000) throw new Error('伝えたい内容を1〜10,000文字で入力してください。');
   const mode = message.mode === undefined ? 'chat' : message.mode;
   if (!['chat', 'agent'].includes(mode)) throw new Error('返信作成モードが不正です。');
+  const interaction = validateInteraction(message.interaction, mode);
+  const referenceDraft = message.referenceDraft;
+  if (referenceDraft !== undefined && (mode !== 'agent' || interaction?.phase !== 'draft'
+    || typeof referenceDraft !== 'string' || !referenceDraft.trim() || referenceDraft.length > 4000)) {
+    throw new Error('返信文案は4,000文字以内で指定してください。');
+  }
   if (message.includeCurrentProject !== undefined && typeof message.includeCurrentProject !== 'boolean') throw new Error('同じプロジェクトを調査する設定が不正です。');
   const includeCurrentProject = message.includeCurrentProject !== false;
   const targets = parseReferences(message.references, page);
@@ -329,7 +402,8 @@ async function handleMessage(message, sender) {
     ]);
     const {comments, excludedComment} = history;
     const context = {...issueContext(page.issueKey, issue, comments), spaceUrl: page.origin, instruction,
-      outputFormatting: {rule: formatting.rule || 'plain', source: formatting.source, projectKey: formatting.projectKey}};
+      outputFormatting: {rule: formatting.rule || 'plain', source: formatting.source, projectKey: formatting.projectKey},
+      ...(referenceDraft !== undefined ? {untrustedDraft: referenceDraft} : {})};
     report(`現在の課題とコメント ${comments.length} 件を取得しました。`);
     report(formatting.message);
     const sources = [{title: page.issueKey, url: `${page.origin}/view/${page.issueKey}`}];
@@ -339,7 +413,10 @@ async function handleMessage(message, sender) {
       sources.push(...references.sources);
     }
     if (mode === 'agent') context.referenceTargets = {...targets, includeCurrentProject};
-    const prompt = `${commonPrompt(await promptManager.getState())}\n\n${BacklogFormatting.instruction(formatting)}\n\n${JSON.stringify(context)}`;
+    const formattingInstruction = interaction?.phase === 'discuss'
+      ? 'この会話の回答は表示用Markdownで書いてください。返信先の記法は、投稿用の文案を作る際に適用します。'
+      : BacklogFormatting.instruction(formatting);
+    const prompt = `${commonPrompt(await promptManager.getState())}\n\n${formattingInstruction}\n\n${JSON.stringify(context)}`;
     if (prompt.length > 160000) throw new Error('課題・コメント・共通プロンプトが長すぎます。コメント取得件数やプロンプトを減らしてください（最大160,000文字）。');
     const model = settings[`${settings.provider}Model`];
     const backlog = mode === 'agent' ? {origin: page.origin, apiKey: settings.backlogKey,
@@ -347,7 +424,7 @@ async function handleMessage(message, sender) {
       projectKeys: [...new Set([...(includeCurrentProject ? [page.issueKey.replace(/-\d+$/, '').toUpperCase()] : []), ...targets.projectKeys])],
       ...(excludedComment ? {excludedComment} : {})} : undefined;
     const result = await connection.request({type: 'generate', mode, provider: settings.provider, ...(model ? {model} : {}), prompt,
-      ...(backlog ? {backlog} : {}), ...(canReport ? {progress: true} : {})}, remainingTime(deadline, 195000), event => report(progressLabel(event)));
+      ...(backlog ? {backlog} : {}), ...(interaction ? {interaction} : {}), ...(canReport ? {progress: true} : {})}, remainingTime(deadline, 195000), event => report(progressLabel(event, interaction)));
     if (typeof result.text !== 'string' || !result.text.trim()) throw new Error('AIから返信文が返りませんでした。');
     return {text: result.text.trim(), issueKey: page.issueKey, commentsUsed: comments.length, provider: settings.provider,
       mode, sources: safeSources([...sources, ...(Array.isArray(result.sources) ? result.sources : [])], page.origin),

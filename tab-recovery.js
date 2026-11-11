@@ -26,7 +26,7 @@
         if (!isIssue(tab.url) || tab.status === 'loading' || tab.discarded) return;
         const target = {tabId, frameIds: [0]};
         await chrome.scripting.insertCSS({target, files: ['content.css']});
-        await chrome.scripting.executeScript({target, files: ['panel-layout.js', 'content.js']});
+        await chrome.scripting.executeScript({target, files: ['panel-layout.js', 'vendor/marked/marked.umd.js', 'chat-markdown.js', 'content.js']});
       })().catch(() => { /* Closed tabs and pages still loading retry on the next activation. */ });
       pending.set(tabId, operation);
       return operation.finally(() => {if (pending.get(tabId) === operation) pending.delete(tabId);});

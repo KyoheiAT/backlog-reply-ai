@@ -33,7 +33,7 @@ test('a missing receiver installs only the extension assets in the trusted top f
   const injection = f.calls.filter(call => ['css', 'script'].includes(call.type));
   assert.deepEqual(JSON.parse(JSON.stringify(injection)), [
     {type: 'css', args: {target: {tabId: 12, frameIds: [0]}, files: ['content.css']}},
-    {type: 'script', args: {target: {tabId: 12, frameIds: [0]}, files: ['panel-layout.js', 'content.js']}}
+    {type: 'script', args: {target: {tabId: 12, frameIds: [0]}, files: ['panel-layout.js', 'vendor/marked/marked.umd.js', 'chat-markdown.js', 'content.js']}}
   ]);
 });
 test('activation, window focus, completed reload, startup and extension update recover idle tabs', async () => {

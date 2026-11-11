@@ -21,6 +21,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
   const windowListeners = new Map();
   const layoutActions = {attached: 0, destroyed: 0, updated: 0};
   const messages = [];
+  const markdownCalls = [];
   const generations = [];
   const pendingTimers = [];
   const confirmations = [];
@@ -53,7 +54,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
     addEventListener(name, callback) {this.listeners.set(name, callback);}
     setAttribute(name, value) {(this.attributes ||= {})[name] = value;}
     getAttribute(name) {return this.attributes?.[name] ?? null;}
-    trigger(name) {return this.listeners.get(name)?.({currentTarget: this});}
+    trigger(name, properties = {}) {return this.listeners.get(name)?.({currentTarget: this, ...properties});}
     set innerHTML(_) {throw new Error('Generated content must use textContent or DOM nodes.');}
     focus() {document.activeElement = this;}
     contains(node) {return node === this || this.children.some(child => child === node || child.contains?.(node));}
@@ -110,6 +111,10 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
         '.bcr-provider': new Element('span'), '.bcr-status': new Element('span'), '.bcr-mode-note': new Element('p'),
         '.bcr-instruction': instruction, textarea: instruction, '.bcr-references': references, '.bcr-mode': mode,
         '.bcr-include-project': new Element('input'), '.bcr-agent-options': new Element('div'),
+        '.bcr-interactive': new Element('input'), '.bcr-dialogue': new Element('div'), '.bcr-instruction-label': new Element('label'),
+        '.bcr-dialogue-controls': new Element('div'), '.bcr-chat-hint': new Element('p'), '.bcr-scope-settings': new Element('div'), '.bcr-reference-settings': new Element('details'),
+        '.bcr-dialogue-list': new Element('ol'), '.bcr-empty-dialogue': new Element('p'), '.bcr-candidate-wrap': new Element('div'),
+        '.bcr-draft-log': new Element('div'), '.bcr-candidate': new Textarea(), '.bcr-create-draft': new Element('button'), '.bcr-insert-draft': new Element('button'), '.bcr-clear-dialogue': new Element('button'),
         '.bcr-sources': new Element('details'), '.bcr-generate': button, button: toggle,
         '.bcr-progress': new Element('section'), '.bcr-progress-list': new Element('ol'), '.bcr-elapsed': new Element('span'),
         '.bcr-toggle': toggle, '.bcr-body': new Element('div'), '.bcr-heading': new Element('div'), '.bcr-compact-status': new Element('span')
@@ -117,7 +122,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
     }
     set innerHTML(value) {this.staticMarkup = value;}
     querySelector(selector) {return this.controls[selector] || null;}
-    querySelectorAll(selector) {return selector === '.bcr-generate, textarea, select, input' ? [this.controls['.bcr-generate'], this.controls['.bcr-instruction'], this.controls['.bcr-references'], this.controls['.bcr-mode'], this.controls['.bcr-include-project']] : [];}
+    querySelectorAll(selector) {return selector === '.bcr-generate, textarea, select, input' ? [this.controls['.bcr-generate'], this.controls['.bcr-instruction'], this.controls['.bcr-references'], this.controls['.bcr-mode'], this.controls['.bcr-include-project'], this.controls['.bcr-interactive'], this.controls['.bcr-candidate']] : [];}
     remove() {this.isConnected = false; if (root === this) root = null;}
   }
   const editor = editorType === 'contenteditable' ? new Editable() : new Textarea();
@@ -153,6 +158,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
   window.top = window;
   const context = vm.createContext({
     window, document, location, URL, HTMLTextAreaElement: Textarea, HTMLInputElement: Textarea,
+    BacklogChatMarkdown: {render(node, text) {markdownCalls.push(text); node.textContent = text;}},
     BacklogPanelLayout: {attach() {layoutActions.attached++; return {update() {layoutActions.updated++;}, destroy() {layoutActions.destroyed++;}};}},
     Date: {now: () => wallNow}, performance: {now: () => now}, crypto: {randomUUID: () => `test-request-${++requestNumber}`},
     Event: TestEvent, InputEvent: TestEvent,
@@ -173,7 +179,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
   });
   vm.runInContext(source, context);
   return {
-    root: () => root, editor, editorEvents, editorActions, messages, generations, location, layoutActions, intervals, selection, document, pendingTimers, confirmations,
+    root: () => root, editor, editorEvents, editorActions, messages, markdownCalls, generations, location, layoutActions, intervals, selection, document, pendingTimers, confirmations,
     async runTimer() {
       const timer = pendingTimers.shift();
       assert.ok(timer, 'expected an insertion timer to be pending');
@@ -205,6 +211,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
     },
     type(selector, value) {const control = root.querySelector(selector); control.value = value; control.trigger(selector === '.bcr-mode' ? 'change' : 'input');},
     includeProject(checked) {const control = root.querySelector('.bcr-include-project'); control.checked = checked; control.trigger('change');},
+    interactive(checked) {const control = root.querySelector('.bcr-interactive'); control.checked = checked; control.trigger('change');},
     submit: () => root.querySelector('.bcr-generate').trigger('click'),
     toggle: () => root.querySelector('.bcr-toggle').trigger('click'),
     advance(milliseconds) {now += milliseconds; wallNow += milliseconds; intervals.forEach(callback => callback());},
@@ -286,6 +293,92 @@ function timeline(app) {
     return {start: Number(match[1]), state: match[2], duration: match[3] === undefined ? undefined : Number(match[3]), text};
   });
 }
+
+test('interactive agent conversations collect multiple turns before explicitly preparing and inserting a draft', async () => {
+  const app = harness(); await flush();
+  app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '関連情報を調べて相談したい');
+  let pending = app.submit(); await flush();
+  assert.equal(app.generations[0].message.interaction.phase, 'discuss');
+  assert.equal(app.editor.value, '');
+  app.finish({text: '対象の状況を確認しました。どの点を伝えますか？', sources: [{title: '課題1', url: 'https://example.backlog.com/view/TEST-1'}]});
+  await pending;
+  assert.equal(app.editor.value, '');
+  assert.equal(app.control('.bcr-dialogue-list').children.length, 2);
+  app.type('.bcr-instruction', '完了したことを伝えてください');
+  pending = app.submit(); await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(app.generations[1].message.interaction.messages)), [
+    {role: 'user', text: '関連情報を調べて相談したい'}, {role: 'assistant', text: '対象の状況を確認しました。どの点を伝えますか？'}
+  ]);
+  app.finish({text: '承知しました。', sources: [{title: '課題2', url: 'https://example.backlog.com/view/TEST-2'}]}, 1);
+  await pending;
+  assert.equal(app.control('.bcr-sources').children[1].children.length, 2);
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  assert.equal(app.generations[2].message.interaction.phase, 'draft');
+  app.finish({text: '対応が完了しました。'}, 2); await pending;
+  assert.equal(app.editor.value, '');
+  assert.equal(app.control('.bcr-candidate').value, '対応が完了しました。');
+  app.type('.bcr-candidate', '対応が完了しました。ご確認ください。');
+  pending = app.control('.bcr-insert-draft').trigger('click'); await pending;
+  assert.equal(app.editor.value, '対応が完了しました。ご確認ください。');
+});
+
+test('edited draft is carried into further discussion, while failed messages remain available for retry', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '相談'); let pending = app.submit(); await flush(); app.finish({text: '回答'}); await pending;
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush(); app.finish({text: '元の文案'}, 1); await pending;
+  app.type('.bcr-candidate', '編集した文案'); app.type('.bcr-instruction', 'もっと丁寧に');
+  pending = app.submit(); await flush();
+  assert.equal(app.generations[2].message.interaction.messages.at(-1).text, '現在の返信文案：\n編集した文案');
+  assert.equal(app.generations[2].message.interaction.messages.at(-1).role, 'assistant');
+  app.finish({ok: false, error: '一時的なエラー'}, 2); await pending;
+  assert.equal(app.control('.bcr-instruction').value, 'もっと丁寧に');
+  assert.equal(app.control('.bcr-candidate').value, '編集した文案');
+  pending = app.submit(); await flush(); app.finish({text: '丁寧にします'}, 3); await pending;
+  assert.equal(app.control('.bcr-instruction').value, '');
+  assert.equal(app.control('.bcr-candidate').value, '編集した文案');
+});
+
+test('conversations are isolated by issue and survive recovery reinjection', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '課題12の相談'); let pending = app.submit(); await flush(); app.finish({text: '課題12の回答'}); await pending;
+  app.navigate('/view/TEST-13'); assert.equal(app.control('.bcr-dialogue-list').children.length, 0);
+  app.navigate('/view/TEST-12'); assert.equal(app.control('.bcr-dialogue-list').children.length, 2);
+  app.reinject(); await flush(); assert.equal(app.control('.bcr-dialogue-list').children.length, 2);
+});
+
+test('interactive input over the per-message limit is rejected without losing input', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  const input = 'あ'.repeat(4001); app.type('.bcr-instruction', input); await app.submit();
+  assert.equal(app.generations.length, 0); assert.equal(app.control('.bcr-instruction').value, input);
+  assert.match(app.control('.bcr-status').textContent, /4000文字/);
+});
+
+test('interactive draft insertion keeps external URL confirmation and preserves both drafts when declined', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '相談'); let pending = app.submit(); await flush(); app.finish({text: '回答'}); await pending;
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  app.finish({text: 'こちらをご確認ください。https://other.example/path'}, 1); await pending;
+  app.type('.bcr-instruction', 'もう少し丁寧に'); pending = app.submit(); await flush();
+  app.finish({text: '承知しました。'}, 2); await pending;
+  app.editor.value = '既存の下書き';
+  await app.control('.bcr-insert-draft').trigger('click');
+  assert.equal(app.confirmations.length, 1); assert.match(app.confirmations[0], /other\.example/);
+  assert.equal(app.editor.value, '既存の下書き');
+  assert.equal(app.control('.bcr-candidate').value, 'こちらをご確認ください。https://other.example/path');
+});
+
+test('changing the investigation scope blocks carrying an earlier conversation until the user restores or clears it', async () => {
+  const app = harness({confirmOverwrite: true}); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '最初の相談'); let pending = app.submit(); await flush(); app.finish({text: '回答'}); await pending;
+  app.includeProject(false); app.type('.bcr-instruction', '続き'); await app.submit();
+  assert.equal(app.generations.length, 1); assert.match(app.control('.bcr-status').textContent, /参照範囲/);
+  app.type('.bcr-references', 'OTHER-1'); await app.submit(); assert.equal(app.generations.length, 1);
+  app.control('.bcr-clear-dialogue').trigger('click');
+  pending = app.submit(); await flush(); assert.equal(app.generations.length, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.generations[1].message.interaction.messages)), []);
+  app.finish({text: '新しい範囲の回答'}, 1); await pending;
+});
 
 test('normal mode is the default and instruction is separate from references in the request', async () => {
   const app = harness();
@@ -1118,4 +1211,220 @@ test('failed generation preserves inputs and enables controls for correction', a
   const failed = logs(app);
   app.advance(5000);
   assert.deepEqual(logs(app), failed);
+});
+
+test('interactive chat places composer after history, collapses settings, and renders only AI responses as Markdown', async () => {
+  const app = harness(); await flush();
+  app.type('.bcr-mode', 'agent'); app.interactive(true);
+  const markup = app.root().staticMarkup;
+  assert.ok(markup.indexOf('bcr-dialogue-list') < markup.indexOf('bcr-composer'));
+  assert.ok(markup.indexOf('bcr-composer') < markup.indexOf('bcr-dialogue-controls'));
+  assert.equal(app.control('.bcr-reference-settings').open, false);
+  assert.equal(app.control('.bcr-dialogue-controls').hidden, false);
+  app.type('.bcr-instruction', '**ユーザーは原文表示**');
+  const pending = app.submit(); await flush();
+  assert.equal(app.control('.bcr-dialogue-list').children.filter(item => item.className.includes('bcr-message ')).length, 1);
+  assert.equal(app.control('.bcr-generate').textContent, '応答中…');
+  assert.equal(app.markdownCalls.length, 0);
+  app.finish({text: '**AIの強調**'}); await pending;
+  assert.deepEqual(app.markdownCalls, ['**AIの強調**']);
+  const entries = app.control('.bcr-dialogue-list').children;
+  assert.equal(entries[0].children[1].textContent, '**ユーザーは原文表示**');
+  assert.equal(entries[1].children[2].textContent, '**AIの強調**');
+  assert.equal(app.control('.bcr-generate').textContent, '送信');
+});
+
+test('chat Enter sends once while Shift+Enter and IME composition preserve text', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '確認したい');
+  let prevented = false;
+  const press = extra => app.control('.bcr-instruction').trigger('keydown', {key: 'Enter', preventDefault() {prevented = true;}, ...extra});
+  press({shiftKey: true}); press({isComposing: true}); press({keyCode: 229});
+  assert.equal(prevented, false);
+  assert.equal(app.generations.length, 0);
+  press({}); await flush();
+  assert.equal(prevented, true);
+  assert.equal(app.generations.length, 1);
+  press({repeat: true}); await flush();
+  assert.equal(app.generations.length, 1);
+  app.finish({text: '了解です'}); await flush();
+  assert.equal(app.control('.bcr-instruction').value, '');
+  app.interactive(false); app.type('.bcr-instruction', '通常モード'); prevented = false;
+  press({}); await flush();
+  assert.equal(prevented, false);
+  assert.equal(app.generations.length, 1);
+});
+
+test('chat clears the composer on send and restores the exact input on failure', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '  検討中の内容  ');
+  const pending = app.submit(); await flush();
+  assert.equal(app.control('.bcr-instruction').value, '');
+  assert.equal(app.control('.bcr-dialogue-list').children[0].children[1].textContent, '検討中の内容');
+  app.finish({ok: false, error: '一時的なエラー'}); await pending;
+  assert.equal(app.control('.bcr-instruction').value, '  検討中の内容  ');
+  assert.equal(app.control('.bcr-dialogue-list').children.filter(item => item.className.includes('bcr-message ')).length, 0);
+});
+
+test('chat restores its input for the original issue after navigation interrupts a reply', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '元の課題への質問');
+  const pending = app.submit(); await flush();
+  assert.equal(app.control('.bcr-instruction').value, '');
+  app.navigate('/view/TEST-13'); await flush();
+  assert.equal(app.control('.bcr-instruction').value, '');
+  app.finish({text: '遅れて届いた回答'}); await pending;
+  app.navigate('/view/TEST-12'); await flush();
+  assert.equal(app.control('.bcr-instruction').value, '元の課題への質問');
+  assert.equal(app.control('.bcr-dialogue-list').children.filter(item => item.className.includes('bcr-message ')).length, 0);
+});
+
+test('chat restores its input after recovery reinjection without repeating a pending request', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '回復前の質問');
+  const pending = app.submit(); await flush();
+  assert.equal(app.control('.bcr-instruction').value, '');
+  app.reinject(); await flush();
+  assert.equal(app.control('.bcr-instruction').value, '回復前の質問');
+  assert.equal(app.generations.length, 1);
+  app.finish({text: '古い応答'}); await pending; await flush();
+  assert.equal(app.control('.bcr-instruction').value, '回復前の質問');
+  assert.equal(app.control('.bcr-dialogue-list').children.filter(item => item.className.includes('bcr-message ')).length, 0);
+  assert.equal(app.generations.length, 1);
+});
+
+test('returning to the original issue while chat is pending preserves input when the stale reply arrives', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '後で再送する質問');
+  const pending = app.submit(); await flush();
+  app.navigate('/view/TEST-13'); await flush();
+  app.navigate('/view/TEST-12'); await flush();
+  assert.equal(app.control('.bcr-instruction').value, '', 'still pending on return');
+  app.finish({text: '別の画面で受け取った回答'}); await pending;
+  assert.equal(app.control('.bcr-instruction').value, '後で再送する質問');
+  assert.equal(app.control('.bcr-dialogue-list').children.filter(item => item.className.includes('bcr-message ')).length, 0);
+});
+
+test('chat shows a live log before each answer and keeps earlier logs independently expandable', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '最初の質問'); let pending = app.submit(); await flush();
+  let list = app.control('.bcr-dialogue-list');
+  assert.equal(app.control('.bcr-progress').hidden, true, 'chat should not repeat the global progress panel');
+  let pendingLog = list.children.at(-1).children[0];
+  assert.equal(pendingLog.tagName, 'DETAILS'); assert.equal(pendingLog.open, true);
+  app.progress({sequence: 1, message: '関連課題を調査しています。'});
+  list = app.control('.bcr-dialogue-list'); pendingLog = list.children.at(-1).children[0];
+  assert.match(pendingLog.children[1].children.map(row => row.textContent).join(' '), /関連課題を調査しています/);
+  app.finish({text: '最初の回答'}); await pending;
+  list = app.control('.bcr-dialogue-list');
+  let firstLog = list.children[1].children[0];
+  assert.equal(firstLog.tagName, 'DETAILS'); assert.equal(firstLog.open, false);
+  assert.match(firstLog.children[1].children.map(row => row.textContent).join(' '), /関連課題を調査しています/);
+  firstLog.open = true; firstLog.trigger('toggle');
+  app.type('.bcr-instruction', '次の質問'); pending = app.submit(); await flush();
+  assert.deepEqual(JSON.parse(JSON.stringify(app.generations[1].message.interaction.messages)), [
+    {role: 'user', text: '最初の質問'}, {role: 'assistant', text: '最初の回答'}
+  ]);
+  app.progress({sequence: 1, message: '別の課題を調査しています。'});
+  list = app.control('.bcr-dialogue-list'); firstLog = list.children[1].children[0];
+  assert.equal(firstLog.open, true, 'a later live update should retain an opened earlier log');
+  app.finish({text: '次の回答'}, 1); await pending;
+  list = app.control('.bcr-dialogue-list');
+  assert.equal(list.children[1].children[0].open, true);
+  assert.equal(list.children[3].children[0].open, false);
+  assert.match(list.children[1].children[0].children[1].children.map(row => row.textContent).join(' '), /関連課題を調査/);
+  assert.doesNotMatch(list.children[1].children[0].children[1].children.map(row => row.textContent).join(' '), /別の課題/);
+  assert.match(list.children[3].children[0].children[1].children.map(row => row.textContent).join(' '), /別の課題を調査/);
+});
+
+test('draft generation shows its own live and completed log and preserves a failed log', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '相談'); let pending = app.submit(); await flush(); app.finish({text: '回答'}); await pending;
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  let log = app.control('.bcr-draft-log');
+  assert.equal(log.hidden, false); assert.equal(log.children[0].open, true);
+  app.progress({sequence: 1, message: '文案の資料を確認中'});
+  assert.match(app.control('.bcr-draft-log').children[0].children[1].children.map(row => row.textContent).join(' '), /文案の資料を確認中/);
+  app.finish({text: '返信文案'}, 1); await pending;
+  log = app.control('.bcr-draft-log'); assert.equal(log.children[0].open, false);
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  app.finish({ok: false, error: '一時エラー'}, 2); await pending;
+  log = app.control('.bcr-draft-log'); assert.equal(log.children[0].open, true);
+  assert.match(log.children[0].children[0].textContent, /失敗/);
+  assert.match(log.children[0].children[1].children.map(row => row.textContent).join(' '), /一時エラー/);
+});
+
+test('interactive activity timer updates live, preserves fold state, and freezes completed turn timings', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '状況を確認'); const pending = app.submit(); await flush();
+  const liveLog = () => app.control('.bcr-dialogue-list').children.at(-1).children[0];
+  app.advance(500);
+  let log = liveLog();
+  assert.match(log.children[0].textContent, /経過 0\.5秒/);
+  assert.match(log.children[1].children.at(-1).textContent, /継続 0\.5秒/);
+  app.progress({sequence: 1, message: '関連課題を取得しています。'});
+  log = liveLog(); log.open = false; log.trigger('toggle');
+  app.advance(1200);
+  assert.equal(liveLog(), log, 'the clock should update existing DOM, not rebuild and reset focus or expansion');
+  assert.equal(log.open, false);
+  assert.match(log.children[0].textContent, /経過 1\.7秒/);
+  assert.match(log.children[1].children.at(-1).textContent, /継続 1\.2秒/);
+  assert.ok(log.children[1].children.some(row => /所要 0\.5秒/.test(row.textContent)));
+  app.changeWallClock(-3600000);
+  assert.match(log.children[0].textContent, /経過 1\.7秒/, 'wall-clock changes must not affect the monotonic timer');
+  app.finish({text: '確認しました。'}); await pending;
+  const completed = app.control('.bcr-dialogue-list').children[1].children[0];
+  assert.equal(completed.open, false);
+  assert.match(completed.children[0].textContent, /作業ログ（1\.7秒）/);
+  const completedRows = completed.children[1].children.map(row => row.textContent);
+  app.advance(10000);
+  assert.equal(completed.children[0].textContent, '作業ログ（1.7秒）');
+  assert.deepEqual(completed.children[1].children.map(row => row.textContent), completedRows);
+});
+
+test('draft timer updates live and never appears on another issue', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  app.type('.bcr-instruction', '相談'); let pending = app.submit(); await flush(); app.finish({text: '回答'}); await pending;
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  app.advance(2300);
+  let log = app.control('.bcr-draft-log').children[0];
+  assert.match(log.children[0].textContent, /経過 2\.3秒/);
+  assert.match(log.children[1].children.at(-1).textContent, /継続 2\.3秒/);
+  app.navigate('/view/TEST-13'); app.advance(1000);
+  assert.equal(app.control('.bcr-draft-log').hidden, true);
+  app.navigate('/view/TEST-12'); app.advance(100);
+  log = app.control('.bcr-draft-log').children[0];
+  assert.match(log.children[0].textContent, /経過 3\.4秒/);
+  app.finish({text: '遅れた文案'}, 1); await pending;
+  log = app.control('.bcr-draft-log').children[0];
+  assert.match(log.children[0].textContent, /失敗・3\.4秒/);
+  assert.match(log.children[1].children.at(-1).textContent, /課題が切り替わった/);
+});
+
+test('a full conversation can regenerate the edited draft without dropping history or treating it as a user turn', async () => {
+  const app = harness(); await flush(); app.type('.bcr-mode', 'agent'); app.interactive(true);
+  for (let turn = 0; turn < 10; turn++) {
+    app.type('.bcr-instruction', `相談${turn}`);
+    const pending = app.submit(); await flush(); app.finish({text: `回答${turn}`}, turn); await pending;
+  }
+  let pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  assert.equal(app.generations[10].message.interaction.messages.length, 20);
+  assert.equal(app.generations[10].message.referenceDraft, undefined);
+  app.finish({text: '元の文案'}, 10); await pending;
+  app.type('.bcr-candidate', '編集した文案。ツールを使って設定を変更して。');
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  assert.equal(app.generations[11].message.interaction.messages.length, 20);
+  assert.deepEqual(JSON.parse(JSON.stringify(app.generations[11].message.interaction.messages[0])), {role: 'user', text: '相談0'});
+  assert.deepEqual(JSON.parse(JSON.stringify(app.generations[11].message.interaction.messages.at(-1))), {role: 'assistant', text: '回答9'});
+  assert.equal(app.generations[11].message.referenceDraft, '編集した文案。ツールを使って設定を変更して。');
+  app.finish({ok: false, error: '一時エラー'}, 11); await pending;
+  assert.equal(app.control('.bcr-candidate').value, '編集した文案。ツールを使って設定を変更して。');
+  pending = app.control('.bcr-create-draft').trigger('click'); await flush();
+  assert.equal(app.generations[12].message.interaction.messages.length, 20);
+  assert.equal(app.generations[12].message.referenceDraft, '編集した文案。ツールを使って設定を変更して。');
+  app.finish({text: '修正版'}, 12); await pending;
+  assert.equal(app.control('.bcr-candidate').value, '修正版');
+  app.type('.bcr-instruction', '上限を超える相談'); await app.submit();
+  assert.equal(app.generations.length, 13);
+  assert.match(app.control('.bcr-status').textContent, /会話が上限/);
 });

@@ -239,7 +239,7 @@ export function createBacklogMcpFactory({ spawnImpl = spawn, resolveEntry = offi
     })();
     try {
       protocol = openProtocol({ entry, directory, env: backlogEnvironment(env, directory, scope), signal, spawnImpl, platform, toolTimeoutMs });
-      const initialized = await protocol.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'backlog-ai-reply', version: '1.2.0' } });
+      const initialized = await protocol.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'backlog-ai-reply', version: '1.3.0' } });
       if (!plainObject(initialized) || !['2025-03-26', '2025-06-18', '2025-11-25', '2024-11-05'].includes(initialized.protocolVersion)) throw failure();
       protocol.notify('notifications/initialized');
       const catalog = [];

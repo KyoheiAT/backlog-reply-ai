@@ -5,10 +5,11 @@
   if (location.protocol !== 'https:' || location.port || !BACKLOG_HOST.test(location.hostname)) return;
   const previousRoot = document.getElementById('bcr-root');
   const restored = previousRoot ? {
-    instruction: previousRoot.querySelector('.bcr-instruction')?.value || '',
+    instruction: previousRoot.bcrPendingInstruction ?? previousRoot.querySelector('.bcr-instruction')?.value ?? '',
     references: previousRoot.querySelector('.bcr-references')?.value || '',
     mode: previousRoot.querySelector('.bcr-mode')?.value === 'agent' ? 'agent' : 'chat',
     includeCurrentProject: previousRoot.querySelector('.bcr-include-project')?.checked !== false,
+    interactive: previousRoot.querySelector('.bcr-interactive')?.checked === true,
     collapsed: previousRoot.classList.contains('bcr-collapsed')
   } : null;
   // A recovery injection replaces only this extension's UI/listeners. Preserve
@@ -31,7 +32,9 @@
   let provider = 'copilot';
   let uiStatus = {path: lastPath, text: '', kind: ''};
   // Keep drafts only in this page's memory, including when Backlog remounts its editor.
-  const drafts = new Map();
+  // Recovery reinjection replaces this script but can reuse the page-local draft
+  // state attached to our own panel, including conversations for other issues.
+  const drafts = previousRoot?.bcrDrafts instanceof Map ? previousRoot.bcrDrafts : new Map();
   const spaceOrigin = `https://${location.hostname}`;
   const providerLabel = value => value === 'codex' ? 'ChatGPT Business（Codex）' : 'GitHub Copilot';
   const editorSelectors = [
@@ -50,24 +53,143 @@
   const tenths = milliseconds => Math.max(0, Math.floor(milliseconds / 100));
   const seconds = value => (value / 10).toFixed(1);
   function getDraft(path) {
-    if (!drafts.has(path)) drafts.set(path, {instruction: '', mode: 'chat', references: '', includeCurrentProject: true, sources: [], sourcesOpen: false, progress: [], elapsedMs: 0, toolCalls: null, resultMode: 'chat'});
+    if (!drafts.has(path)) drafts.set(path, {instruction: '', mode: 'chat', references: '', includeCurrentProject: true, interactive: false, messages: [], userInputs: [], conversationScope: null, candidate: '', candidateVisible: false, sentCandidate: '', candidateActivity: null, failedActivity: null, sources: [], sourcesOpen: false, progress: [], elapsedMs: 0, toolCalls: null, resultMode: 'chat'});
     return drafts.get(path);
   }
   if (restored) Object.assign(getDraft(lastPath), restored);
   function saveDraft(root, path) {
     const draft = getDraft(path);
-    draft.instruction = root.querySelector('.bcr-instruction').value;
+    if (!(task?.path === path && task.phase === 'discuss')) draft.instruction = root.querySelector('.bcr-instruction').value;
     draft.mode = root.querySelector('.bcr-mode').value === 'agent' ? 'agent' : 'chat';
     draft.references = root.querySelector('.bcr-references').value;
     draft.includeCurrentProject = root.querySelector('.bcr-include-project').checked;
+    draft.interactive = root.querySelector('.bcr-interactive').checked;
     return draft;
   }
   function renderModeNote(root) {
     const agentMode = root.querySelector('.bcr-mode').value === 'agent';
     root.querySelector('.bcr-agent-options').hidden = !agentMode;
+    const interactive = agentMode && root.querySelector('.bcr-interactive').checked;
+    root.querySelector('.bcr-dialogue').hidden = !interactive;
+    root.querySelector('.bcr-dialogue-controls').hidden = !interactive;
+    root.querySelector('.bcr-chat-hint').hidden = !interactive;
+    root.querySelector('.bcr-scope-settings').hidden = !agentMode;
+    root.classList.toggle('bcr-chat-mode', interactive);
+    if (root.bcrWasInteractive !== interactive) {
+      root.querySelector('.bcr-reference-settings').open = !interactive;
+      root.bcrWasInteractive = interactive;
+    }
+    root.querySelector('.bcr-instruction-label').textContent = interactive ? 'メッセージ' : '今回伝えたい内容';
+    root.querySelector('.bcr-instruction').placeholder = interactive ? '相談したいことや返信で伝えたいことを入力' : '例：修正が完了したので、関連課題の状況も踏まえて確認をお願いしたい';
+    root.querySelector('.bcr-generate').textContent = interactive ? (task ? '応答中…' : '送信') : 'AIで返信文を生成';
     root.querySelector('.bcr-mode-note').textContent = agentMode
       ? `${root.querySelector('.bcr-include-project').checked ? '現在のプロジェクトと指定範囲' : '現在の課題と明示的に指定した参照先だけ'}から、Backlog MCPで必要な情報を読み取り・検索します。課題の変更や投稿は行いません。`
       : '現在の課題と指定した課題・プロジェクトの情報をまとめて参照して、返信案を作成します。';
+  }
+  function progressText(entry, next, milliseconds, running) {
+    const start = tenths(entry.elapsedMs);
+    const duration = Math.max(0, tenths(next ? next.elapsedMs : milliseconds) - start);
+    const active = !entry.terminal && !next && running;
+    return {active, label: `+${seconds(start)}秒${entry.terminal ? '' : `（${active ? '継続' : '所要'} ${seconds(duration)}秒）`}：${entry.message}`};
+  }
+  function updateActivityElapsed(details, milliseconds, running) {
+    const activity = details.bcrActivity;
+    const summary = details.children[0];
+    summary.textContent = running ? `作業中…（経過 ${seconds(tenths(milliseconds))}秒）`
+      : activity.failed ? `作業ログ（失敗・${seconds(tenths(milliseconds))}秒）` : `作業ログ（${seconds(tenths(milliseconds))}秒）`;
+    const rows = details.children[1].children;
+    for (let index = 0; index < activity.entries.length; index++) {
+      const row = rows[index];
+      if (!row) continue;
+      const {label, active} = progressText(activity.entries[index], activity.entries[index + 1], milliseconds, running);
+      if (row.textContent !== label) row.textContent = label;
+      row.className = active ? 'bcr-progress-current' : '';
+    }
+  }
+  function activityView(activity, running = false) {
+    const details = document.createElement('details');
+    details.className = 'bcr-chat-activity';
+    details.bcrActivity = activity;
+    details.open = running ? activity.open !== false : activity.open === true;
+    const summary = document.createElement('summary');
+    const list = document.createElement('ol');
+    for (const entry of activity.entries) list.appendChild(document.createElement('li'));
+    details.appendChild(summary);
+    details.appendChild(list);
+    updateActivityElapsed(details, running && task?.activity === activity ? taskElapsed(task) : activity.elapsedMs, running);
+    details.addEventListener('toggle', () => {activity.open = details.open;});
+    return details;
+  }
+  function renderDialogue(root) {
+    const draft = getDraft(location.pathname);
+    const list = root.querySelector('.bcr-dialogue-list');
+    const pendingMessage = task?.path === location.pathname && task.phase === 'discuss' && !task.responseReceived ? task.instruction : '';
+    const activeDiscuss = task?.path === location.pathname && task.phase === 'discuss' && task.finishedElapsedMs === null;
+    const activityVersion = activeDiscuss ? draft.progress : draft.failedActivity;
+    if (root.bcrRenderedMessages !== draft.messages || root.bcrRenderedPending !== pendingMessage || root.bcrRenderedChatActivity !== activityVersion) {
+      root.bcrRenderedChatActivity = activityVersion;
+      const followLatest = !list.children.length || (pendingMessage && root.bcrRenderedPending !== pendingMessage) || list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+      root.bcrRenderedMessages = draft.messages;
+      root.bcrRenderedPending = pendingMessage;
+      for (const row of list.children) {
+        const details = row.bcrActivityDetails;
+        if (details?.bcrActivity) details.bcrActivity.open = details.open;
+      }
+      list.replaceChildren();
+      for (const message of [...draft.messages, ...(pendingMessage ? [{role: 'user', text: pendingMessage}] : [])]) {
+        const item = document.createElement('li');
+        item.className = `bcr-message bcr-message-${message.role}`;
+        const heading = document.createElement('strong');
+        heading.textContent = message.role === 'user' ? 'あなた' : 'AI';
+        const body = document.createElement('div');
+        body.className = 'bcr-message-body';
+        if (message.role === 'assistant' && globalThis.BacklogChatMarkdown) {
+          globalThis.BacklogChatMarkdown.render(body, message.text);
+        } else {
+          body.textContent = message.text;
+        }
+        if (message.role === 'assistant' && message.activity) {
+          item.bcrActivityDetails = activityView(message.activity);
+          item.appendChild(item.bcrActivityDetails);
+        }
+        item.appendChild(heading);
+        item.appendChild(body);
+        list.appendChild(item);
+      }
+      if ((activeDiscuss && draft.progress.length) || draft.failedActivity?.phase === 'discuss') {
+        const row = document.createElement('li');
+        row.className = 'bcr-activity-row';
+        if (activeDiscuss) {
+          task.activity.entries = draft.progress;
+          row.bcrActivityDetails = activityView(task.activity, true);
+        } else row.bcrActivityDetails = activityView(draft.failedActivity);
+        row.appendChild(row.bcrActivityDetails);
+        list.appendChild(row);
+      }
+      if (followLatest) list.scrollTop = list.scrollHeight;
+    }
+    root.querySelector('.bcr-empty-dialogue').hidden = draft.messages.length > 0 || !!pendingMessage;
+    const draftLog = root.querySelector('.bcr-draft-log');
+    const activeDraft = task?.path === location.pathname && task.phase === 'draft' && task.finishedElapsedMs === null;
+    const draftActivity = activeDraft ? task.activity : draft.failedActivity?.phase === 'draft' ? draft.failedActivity : draft.candidateActivity;
+    const draftVersion = activeDraft ? draft.progress : draftActivity;
+    if (root.bcrRenderedDraftActivity !== draftVersion) {
+      root.bcrRenderedDraftActivity = draftVersion;
+      const existing = draftLog.children[0];
+      if (existing?.bcrActivity) existing.bcrActivity.open = existing.open;
+      draftLog.replaceChildren();
+      if (draftActivity) {
+        if (activeDraft) draftActivity.entries = draft.progress;
+        draftLog.appendChild(activityView(draftActivity, activeDraft));
+      }
+    }
+    draftLog.hidden = !draftActivity;
+    root.querySelector('.bcr-candidate-wrap').hidden = !draft.candidateVisible;
+    const candidate = root.querySelector('.bcr-candidate');
+    if (candidate.value !== draft.candidate) candidate.value = draft.candidate;
+    root.querySelector('.bcr-create-draft').disabled = !!task || !draft.messages.length;
+    root.querySelector('.bcr-insert-draft').disabled = !!task || !draft.candidate.trim();
+    root.querySelector('.bcr-clear-dialogue').disabled = !!task || !draft.messages.length && !draft.candidate;
   }
   function safeSources(sources) {
     const seen = new Set();
@@ -124,18 +246,22 @@
       const next = draft.progress[index + 1];
       const row = rows[index];
       if (!row) continue;
-      const start = tenths(entry.elapsedMs);
       // Use the same displayed endpoints so all intervals add up to the total.
-      const duration = Math.max(0, tenths(next ? next.elapsedMs : milliseconds) - start);
-      const active = !entry.terminal && !next && running;
-      const label = `+${seconds(start)}秒${entry.terminal ? '' : `（${active ? '継続' : '所要'} ${seconds(duration)}秒）`}：${entry.message}`;
+      const {label, active} = progressText(entry, next, milliseconds, running);
       if (row.textContent !== label) row.textContent = label;
       row.className = active ? 'bcr-progress-current' : '';
+    }
+    if (running && currentTask.activity) {
+      const container = currentTask.phase === 'discuss' ? root.querySelector('.bcr-dialogue-list') : root.querySelector('.bcr-draft-log');
+      const details = currentTask.phase === 'discuss'
+        ? [...container.children].map(row => row.bcrActivityDetails).find(view => view?.bcrActivity === currentTask.activity)
+        : container.children[0];
+      if (details?.bcrActivity === currentTask.activity) updateActivityElapsed(details, milliseconds, true);
     }
   }
   function renderProgress(root) {
     const draft = getDraft(location.pathname);
-    root.querySelector('.bcr-progress').hidden = draft.progress.length === 0;
+    root.querySelector('.bcr-progress').hidden = draft.progress.length === 0 || (draft.mode === 'agent' && draft.interactive);
     if (root.bcrRenderedProgress !== draft.progress) {
       root.bcrRenderedProgress = draft.progress;
       const list = root.querySelector('.bcr-progress-list');
@@ -294,6 +420,7 @@
     root.querySelector('.bcr-provider').textContent = providerLabel(provider);
     for (const control of root.querySelectorAll('.bcr-generate, textarea, select, input')) control.disabled = !!task;
     renderModeNote(root);
+    renderDialogue(root);
     renderSources(root);
     renderProgress(root);
     const status = root.querySelector('.bcr-status');
@@ -336,6 +463,33 @@
       if (terminal || draft.progress.at(-1)?.message !== message) draft.progress = [...draft.progress, {elapsedMs, message, terminal}];
     }
     renderState();
+  }
+  async function insertReply(currentTask, result, instruction) {
+    setStatus(currentTask.path, '生成文を受け取りました。コメント入力欄への反映を準備しています。');
+    const hosts = unexpectedHosts(result.text, instruction);
+    if (hosts.length) {
+      setStatus(currentTask.path, '生成文に外部URLが含まれています。確認ダイアログの操作を待っています。');
+      if (!confirm(`生成文に、今回の入力にも現在のBacklogスペースにもないURL（${hosts.slice(0, 3).join('、')}${hosts.length > 3 ? ' ほか' : ''}）が含まれています。課題やコメント内の指示で混入した可能性があります。\nリンクや画像の宛先を確認したうえで、コメント入力欄に反映しますか？`)) {
+        setStatus(currentTask.path, '外部URLを含むため、生成文の挿入をキャンセルしました。', '', true); return;
+      }
+    }
+    const target = findEditor();
+    if (!target) throw new Error('コメント入力欄が見つかりません。');
+    if ((target.value || target.textContent || '').trim()) {
+      setStatus(currentTask.path, '既存コメントの置き換えを確認しています。確認ダイアログの操作を待っています。');
+      if (!confirm('既存のコメント入力内容を生成文で置き換えますか？')) {
+        setStatus(currentTask.path, '挿入をキャンセルしました。', '', true); return;
+      }
+      setStatus(currentTask.path, '生成文をコメント入力欄に反映しています。');
+    }
+    const assertCurrentEditor = () => {
+      checkNavigation();
+      if (disposed || currentTask.version !== navigationVersion || location.pathname !== currentTask.path) throw new Error('課題の表示が変わったため、生成文の挿入を中止しました。');
+      if (!target.isConnected || findEditor() !== target) throw new Error('コメント入力欄が切り替わったため、生成文の挿入を中止しました。');
+    };
+    await setEditorValue(target, result.text, assertCurrentEditor);
+    assertCurrentEditor();
+    setStatus(currentTask.path, `${providerLabel(result.provider)}の生成文を挿入しました（参照コメント ${result.commentsUsed} 件）。${hosts.length ? '外部URLの宛先も含めて' : ''}確認して手動で投稿してください。`, 'ok', true);
   }
   const onMessage = (message, sender, sendResponse) => {
     if (disposed) return;
@@ -442,16 +596,40 @@
         </select>
         <p id="bcr-mode-note" class="bcr-note bcr-mode-note"></p>
         <div class="bcr-agent-options" hidden>
-          <label class="bcr-checkbox" for="bcr-include-project"><input id="bcr-include-project" class="bcr-include-project" type="checkbox" checked aria-describedby="bcr-scope-note">同じプロジェクト内の他課題も調査する</label>
-          <p id="bcr-scope-note" class="bcr-note">オフの場合は現在の課題と追加で指定した参照先だけが対象です。参照欄に指定したプロジェクトは、オフでも調査します。</p>
+          <label class="bcr-checkbox" for="bcr-interactive"><input id="bcr-interactive" class="bcr-interactive" type="checkbox">対話しながら返信を考える</label>
         </div>
-        <label class="bcr-label" for="bcr-instruction">今回伝えたい内容</label>
-        <textarea id="bcr-instruction" class="bcr-instruction" maxlength="10000" placeholder="例：修正が完了したので、関連課題の状況も踏まえて確認をお願いしたい"></textarea>
-        <label class="bcr-label" for="bcr-references">追加で参照する課題・プロジェクト（任意）</label>
-        <textarea id="bcr-references" class="bcr-references" aria-describedby="bcr-references-note" maxlength="2000" placeholder="例：PROJECT-123, OTHER_PROJECT&#10;課題URLやプロジェクトURLも指定できます"></textarea>
-        <p id="bcr-references-note" class="bcr-note">同じBacklogスペース内の課題キー・プロジェクトキー、またはURLを空白・改行・カンマで区切って指定します。追加は課題5件・プロジェクト3件まで。</p>
+        <details class="bcr-reference-settings" open>
+          <summary>参照する情報の設定</summary>
+          <div class="bcr-scope-settings" hidden>
+            <label class="bcr-checkbox" for="bcr-include-project"><input id="bcr-include-project" class="bcr-include-project" type="checkbox" checked aria-describedby="bcr-scope-note">同じプロジェクト内の他課題も調査する</label>
+            <p id="bcr-scope-note" class="bcr-note">オフの場合は現在の課題と追加で指定した参照先だけが対象です。参照欄に指定したプロジェクトは、オフでも調査します。</p>
+          </div>
+          <label class="bcr-label" for="bcr-references">追加で参照する課題・プロジェクト（任意）</label>
+          <textarea id="bcr-references" class="bcr-references" aria-describedby="bcr-references-note" maxlength="2000" placeholder="例：PROJECT-123, OTHER_PROJECT&#10;課題URLやプロジェクトURLも指定できます"></textarea>
+          <p id="bcr-references-note" class="bcr-note">同じBacklogスペース内の課題キー・プロジェクトキー、またはURLを空白・改行・カンマで区切って指定します。追加は課題5件・プロジェクト3件まで。</p>
+        </details>
+        <div class="bcr-dialogue" hidden>
+          <p class="bcr-empty-dialogue bcr-note">調べてほしいことや伝えたいことを入力して、AIに相談しましょう。</p>
+          <ol class="bcr-dialogue-list" aria-label="AIとの会話" aria-live="polite"></ol>
+        </div>
+        <label class="bcr-label bcr-instruction-label" for="bcr-instruction">今回伝えたい内容</label>
+        <div class="bcr-composer">
+          <textarea id="bcr-instruction" class="bcr-instruction" maxlength="10000" placeholder="例：修正が完了したので、関連課題の状況も踏まえて確認をお願いしたい"></textarea>
+          <button class="bcr-generate" type="button">AIで返信文を生成</button>
+        </div>
+        <p class="bcr-chat-hint" hidden>Enterで送信、Shift + Enterで改行</p>
+        <span class="bcr-status" role="status" aria-live="polite"></span>
+        <div class="bcr-dialogue-controls" hidden>
+          <div class="bcr-dialogue-actions"><button class="bcr-create-draft" type="button">会話から返信文案を作成</button><button class="bcr-clear-dialogue" type="button">会話を最初から</button></div>
+          <div class="bcr-draft-log" hidden></div>
+          <div class="bcr-candidate-wrap" hidden>
+            <label class="bcr-label" for="bcr-candidate">返信文案（編集できます）</label>
+            <textarea id="bcr-candidate" class="bcr-candidate" maxlength="10000"></textarea>
+            <p class="bcr-note">続けて相談する場合は、この文案もAIに送信します。</p>
+            <button class="bcr-insert-draft" type="button">この文案をコメント欄に反映</button>
+          </div>
+        </div>
       </fieldset>
-      <div class="bcr-actions"><span class="bcr-status" role="status" aria-live="polite"></span><button class="bcr-generate" type="button">AIで返信文を生成</button></div>
       <section class="bcr-progress" aria-label="作業ログ" hidden>
         <div class="bcr-progress-heading">作業ログ <span class="bcr-elapsed"></span></div>
         <p class="bcr-progress-note">「+」は生成開始からの経過、所要は次のログまでの時間です。</p>
@@ -460,17 +638,28 @@
       <details class="bcr-sources" aria-label="直近の生成で参照した情報" hidden></details>
       </div>`;
     editor.parentElement?.insertBefore(root, editor);
+    root.bcrDrafts = drafts;
     panelLayout = BacklogPanelLayout.attach(root, editor);
     mountedEditor = editor;
     const mountedPath = location.pathname;
     const draft = getDraft(mountedPath);
-    root.querySelector('.bcr-instruction').value = draft.instruction;
+    const pendingInstruction = task?.path === mountedPath && task.phase === 'discuss' ? draft.instruction : null;
+    root.querySelector('.bcr-instruction').value = pendingInstruction === null ? draft.instruction : '';
+    if (pendingInstruction !== null) root.bcrPendingInstruction = pendingInstruction;
     root.querySelector('.bcr-mode').value = draft.mode;
     root.querySelector('.bcr-references').value = draft.references;
     root.querySelector('.bcr-include-project').checked = draft.includeCurrentProject;
+    root.querySelector('.bcr-interactive').checked = draft.interactive;
     for (const selector of ['.bcr-instruction', '.bcr-references']) root.querySelector(selector).addEventListener('input', () => {saveDraft(root, mountedPath);});
-    root.querySelector('.bcr-mode').addEventListener('change', () => {saveDraft(root, mountedPath); renderModeNote(root);});
+    root.querySelector('.bcr-mode').addEventListener('change', () => {saveDraft(root, mountedPath); renderState();});
     root.querySelector('.bcr-include-project').addEventListener('change', () => {saveDraft(root, mountedPath); renderModeNote(root);});
+    root.querySelector('.bcr-interactive').addEventListener('change', () => {saveDraft(root, mountedPath); renderState();});
+    root.querySelector('.bcr-candidate').addEventListener('input', event => {draft.candidate = event.currentTarget.value; root.querySelector('.bcr-insert-draft').disabled = !draft.candidate.trim();});
+    root.querySelector('.bcr-clear-dialogue').addEventListener('click', () => {
+      if (task || !confirm('この課題の会話と返信文案を消去しますか？')) return;
+      draft.messages = []; draft.userInputs = []; draft.conversationScope = null; draft.candidate = ''; draft.candidateVisible = false; draft.sentCandidate = ''; draft.candidateActivity = null; draft.failedActivity = null; draft.sources = [];
+      renderState();
+    });
     root.querySelector('.bcr-sources').addEventListener('toggle', event => {getDraft(mountedPath).sourcesOpen = event.currentTarget.open;});
     root.querySelector('.bcr-toggle').addEventListener('click', () => {
       panelCollapsed = !panelCollapsed;
@@ -478,21 +667,48 @@
     });
     renderState();
     refreshSettings().catch(error => {if (root.isConnected && !task) setStatus(mountedPath, error.message, 'error');});
-    root.querySelector('.bcr-generate').addEventListener('click', async () => {
+    async function runGeneration(phase = null) {
       if (task) return;
       const draft = saveDraft(root, mountedPath);
-      const instruction = draft.instruction.trim();
-      if (!instruction) {setStatus(location.pathname, '伝えたい内容を入力してください。', 'error'); return;}
+      const interactive = draft.mode === 'agent' && draft.interactive;
+      if (!interactive) phase = null;
+      if (interactive && !phase) phase = 'discuss';
+      const instruction = phase === 'draft' ? 'これまでのやり取りを踏まえて、投稿する返信文案を作成してください。' : draft.instruction.trim();
+      if (!instruction) {setStatus(location.pathname, interactive ? 'メッセージを入力してください。' : '伝えたい内容を入力してください。', 'error'); return;}
+      if (phase === 'draft' && draft.instruction.trim()) {setStatus(location.pathname, '入力中のメッセージを送信してから文案を作成してください。', 'error'); return;}
+      if (phase === 'draft' && !draft.messages.length) {setStatus(location.pathname, '先にメッセージを送信してください。', 'error'); return;}
+      if (phase === 'discuss' && instruction.length > 4000) {setStatus(location.pathname, 'メッセージは4000文字以内で入力してください。', 'error'); return;}
+      const scope = JSON.stringify({references: draft.references.trim(), includeCurrentProject: draft.includeCurrentProject});
+      if (interactive && draft.conversationScope !== null && draft.conversationScope !== scope) {
+        setStatus(location.pathname, '参照範囲が会話開始時から変更されています。元に戻すか、「会話を最初から」で会話を消去してから送信してください。', 'error'); return;
+      }
+      // A draft being regenerated is separate untrusted reference data, not an
+      // extra conversation turn. This preserves the complete bounded history.
+      const candidateText = phase === 'discuss' && draft.candidate && draft.candidate !== draft.sentCandidate ? `現在の返信文案：\n${draft.candidate}` : '';
+      const referenceDraft = phase === 'draft' && draft.candidate.trim() ? draft.candidate : undefined;
+      if (candidateText.length > 4000 || referenceDraft?.length > 4000) {setStatus(location.pathname, '会話に引き継ぐ返信文案が長すぎます。4000文字以内に短くしてからお試しください。', 'error'); return;}
+      const messages = [...draft.messages, ...(candidateText ? [{role: 'assistant', text: candidateText}] : [])];
+      const historyLength = messages.reduce((sum, message) => sum + message.text.length, 0);
+      if (interactive && (messages.length > 20 || historyLength > 24000 || phase === 'discuss' && (messages.length + 2 > 20 || historyLength + instruction.length > 24000))) {
+        setStatus(location.pathname, '会話が上限に達しました。必要な内容を控えて「会話を最初から」で新しく始めてください。', 'error'); return;
+      }
       checkNavigation();
       if (mountedPath !== location.pathname) {setStatus(location.pathname, '課題が切り替わりました。表示中の課題で生成してください。', 'error'); return;}
       const currentTask = {path: location.pathname, issueKey: issueKey(), version: navigationVersion, mode: draft.mode, references: draft.references.trim(), includeCurrentProject: draft.includeCurrentProject,
-        requestId: crypto.randomUUID(), progressSequence: 0, startedAt: performance.now(), elapsedMs: 0, finishedElapsedMs: null, responseReceived: false};
-      draft.sources = [];
+        requestId: crypto.randomUUID(), progressSequence: 0, startedAt: performance.now(), elapsedMs: 0, finishedElapsedMs: null, responseReceived: false, phase, instruction};
+      if (interactive) {currentTask.activity = {entries: [], elapsedMs: 0, open: true}; draft.failedActivity = null;}
+      const priorSources = interactive ? draft.sources : [];
+      if (!interactive) draft.sources = [];
       draft.sourcesOpen = false;
       draft.progress = [];
       draft.elapsedMs = 0;
       draft.toolCalls = null;
       task = currentTask;
+      let discussionCommitted = false;
+      if (phase === 'discuss') {
+        root.bcrPendingInstruction = draft.instruction;
+        root.querySelector('.bcr-instruction').value = '';
+      }
       setStatus(currentTask.path, '設定を確認しています…');
       try {
         const settings = await refreshSettings();
@@ -502,51 +718,87 @@
         setStatus(currentTask.path, currentTask.mode === 'agent'
           ? `${providerLabel(settings.provider)}に調査・生成処理を依頼しています…`
           : `${providerLabel(settings.provider)}に生成処理を依頼しています…`);
-        const result = await chrome.runtime.sendMessage({type: 'GENERATE_REPLY', instruction, issueKey: currentTask.issueKey, provider: settings.provider, mode: currentTask.mode, references: currentTask.references, includeCurrentProject: currentTask.includeCurrentProject, requestId: currentTask.requestId});
+        const result = await chrome.runtime.sendMessage({type: 'GENERATE_REPLY', instruction, issueKey: currentTask.issueKey, provider: settings.provider, mode: currentTask.mode, references: currentTask.references, includeCurrentProject: currentTask.includeCurrentProject, requestId: currentTask.requestId, ...(interactive ? {interaction: {phase, messages: messages.map(({role, text}) => ({role, text}))}} : {}), ...(referenceDraft ? {referenceDraft} : {})});
         if (disposed) return;
         currentTask.responseReceived = true;
         if (!result?.ok) throw new Error(result?.error || '生成に失敗しました。');
         checkNavigation();
         if (currentTask.version !== navigationVersion || location.pathname !== currentTask.path || result.issueKey !== currentTask.issueKey) throw new Error('生成中に課題が切り替わったため、生成文は挿入しませんでした。');
-        draft.sources = safeSources(result.sources);
+        draft.sources = safeSources([...priorSources, ...(Array.isArray(result.sources) ? result.sources : [])]);
         draft.resultMode = result.mode === 'agent' ? 'agent' : currentTask.mode;
         draft.toolCalls = Number.isInteger(result.toolCalls) && result.toolCalls >= 0 ? result.toolCalls : null;
-        setStatus(currentTask.path, '生成文を受け取りました。コメント入力欄への反映を準備しています。');
-        const hosts = unexpectedHosts(result.text, instruction);
-        if (hosts.length) {
-          setStatus(currentTask.path, '生成文に外部URLが含まれています。確認ダイアログの操作を待っています。');
-          if (!confirm(`生成文に、今回の入力にも現在のBacklogスペースにもないURL（${hosts.slice(0, 3).join('、')}${hosts.length > 3 ? ' ほか' : ''}）が含まれています。課題やコメント内の指示で混入した可能性があります。\nリンクや画像の宛先を確認したうえで、コメント入力欄に反映しますか？`)) {
-            setStatus(currentTask.path, '外部URLを含むため、生成文の挿入をキャンセルしました。', '', true); return;
+        draft.commentsUsed = result.commentsUsed;
+        if (interactive) {
+          if (typeof result.text !== 'string' || !result.text.trim()) throw new Error('AIからの応答が空でした。もう一度お試しください。');
+          if (phase === 'discuss') {
+            if (result.text.length > 4000 || historyLength + instruction.length + result.text.length > 24000) throw new Error('AIからの応答が会話の文字数上限を超えました。入力を短くしてもう一度お試しください。');
+            setStatus(currentTask.path, '回答を受け取りました。続けて相談できます。', 'ok', true);
+            const assistantMessage = {role: 'assistant', text: result.text, activity: {entries: [...draft.progress], elapsedMs: draft.elapsedMs, open: false}};
+            draft.messages = [...messages, {role: 'user', text: instruction}, assistantMessage];
+            draft.userInputs = [...draft.userInputs, instruction];
+            draft.conversationScope = scope;
+            if (candidateText) draft.sentCandidate = draft.candidate;
+            draft.instruction = '';
+            discussionCommitted = true;
+            const currentRoot = document.getElementById('bcr-root');
+            if (currentRoot && location.pathname === currentTask.path) currentRoot.querySelector('.bcr-instruction').value = '';
+
+          } else {
+            if (result.text.length > 10000) throw new Error('返信文案が長すぎます。会話で短くするよう伝えてから、もう一度作成してください。');
+            draft.candidate = result.text;
+            draft.candidateVisible = true;
+            setStatus(currentTask.path, '返信文案を作成しました。内容を確認・編集してからコメント欄に反映してください。', 'ok', true);
+            draft.candidateActivity = {entries: [...draft.progress], elapsedMs: draft.elapsedMs, open: false};
           }
+          return;
         }
-        const target = findEditor();
-        if (!target) throw new Error('コメント入力欄が見つかりません。');
-        if ((target.value || target.textContent || '').trim()) {
-          setStatus(currentTask.path, '既存コメントの置き換えを確認しています。確認ダイアログの操作を待っています。');
-          if (!confirm('既存のコメント入力内容を生成文で置き換えますか？')) {
-            setStatus(currentTask.path, '挿入をキャンセルしました。', '', true); return;
-          }
-          setStatus(currentTask.path, '生成文をコメント入力欄に反映しています。');
-        }
-        const assertCurrentEditor = () => {
-          checkNavigation();
-          if (disposed || currentTask.version !== navigationVersion || location.pathname !== currentTask.path) {
-            throw new Error('課題の表示が変わったため、生成文の挿入を中止しました。');
-          }
-          if (!target.isConnected || findEditor() !== target) {
-            throw new Error('コメント入力欄が切り替わったため、生成文の挿入を中止しました。');
-          }
-        };
-        await setEditorValue(target, result.text, assertCurrentEditor);
-        assertCurrentEditor();
-        setStatus(currentTask.path, `${providerLabel(result.provider)}の生成文を挿入しました（参照コメント ${result.commentsUsed} 件）。${hosts.length ? '外部URLの宛先も含めて' : ''}確認して手動で投稿してください。`, 'ok', true);
+        await insertReply(currentTask, result, instruction);
       } catch (error) {
         if (isConnectionError(error)) connectionFailed = true;
-        if (!disposed) setStatus(currentTask.path, connectionMessage(error), 'error', true);
+        if (!disposed) {
+          setStatus(currentTask.path, connectionMessage(error), 'error', true);
+          if (interactive && (phase === 'discuss' || phase === 'draft')) {
+            draft.failedActivity = {phase, entries: [...draft.progress], elapsedMs: draft.elapsedMs, open: true, failed: true};
+          }
+        }
       } finally {
+        if (phase === 'discuss' && !disposed) {
+          const currentRoot = document.getElementById('bcr-root');
+          if (currentRoot && location.pathname === currentTask.path) {
+            if (!discussionCommitted) currentRoot.querySelector('.bcr-instruction').value = draft.instruction;
+            delete currentRoot.bcrPendingInstruction;
+          }
+        }
         draft.elapsedMs = taskElapsed(currentTask);
         task = null;
         renderState(); // Also resets a panel remounted while the request was running.
+      }
+    }
+    root.querySelector('.bcr-generate').addEventListener('click', () => runGeneration());
+    root.querySelector('.bcr-instruction').addEventListener('keydown', event => {
+      if (draft.mode !== 'agent' || !draft.interactive || event.key !== 'Enter' || event.shiftKey
+        || event.ctrlKey || event.altKey || event.metaKey || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      if (!task && !event.repeat) void runGeneration();
+    });
+    root.querySelector('.bcr-create-draft').addEventListener('click', () => runGeneration('draft'));
+    root.querySelector('.bcr-insert-draft').addEventListener('click', async () => {
+      if (task) return;
+      checkNavigation();
+      if (mountedPath !== location.pathname) {setStatus(location.pathname, '課題が切り替わりました。表示中の課題で操作してください。', 'error'); return;}
+      const draft = getDraft(mountedPath);
+      const text = draft.candidate;
+      if (!text.trim()) {setStatus(mountedPath, '反映する返信文案を入力してください。', 'error'); return;}
+      const currentTask = {path: mountedPath, issueKey: issueKey(), version: navigationVersion, requestId: crypto.randomUUID(), progressSequence: 0, startedAt: performance.now(), elapsedMs: 0, finishedElapsedMs: null, responseReceived: true};
+      task = currentTask;
+      try {
+        // Context copied from an AI draft is not user-supplied URL evidence.
+        await insertReply(currentTask, {text, provider, commentsUsed: draft.commentsUsed ?? 0}, draft.userInputs.join('\n'));
+      } catch (error) {
+        if (!disposed) setStatus(mountedPath, connectionMessage(error), 'error', true);
+      } finally {
+        task = null;
+        renderState();
       }
     });
   }

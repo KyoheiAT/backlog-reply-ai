@@ -69,6 +69,66 @@ function descendants(element, tag) {
   return element.children.flatMap(child => [...(child.tagName === tag.toUpperCase() ? [child] : []), ...descendants(child, tag)]);
 }
 
+test('each changed prompt setting has an individual save that preserves unrelated unsaved edits', async () => {
+  const initial = profile({displayName: '保存名', generatedPrompt: '保存済み本文', fixedPrompt: '保存済み補足', revision: 3});
+  const app = harness(initial); await flush();
+  assert.equal(app.element('promptDisplayNameSave').hidden, true);
+  assert.equal(app.element('promptGeneratedSave').hidden, true);
+  app.type('promptDisplayName', '  新しい名前  ');
+  app.type('promptGenerated', '未保存の本文');
+  assert.equal(app.element('promptDisplayNameSave').hidden, false);
+  assert.equal(app.element('promptGeneratedSave').hidden, false);
+  const pending = app.element('promptDisplayNameSave').dispatch('click');
+  const request = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(request.message.profile.displayName, '新しい名前');
+  assert.equal(request.message.profile.generatedPrompt, '保存済み本文');
+  assert.equal(request.message.profile.revision, 3);
+  app.resolve(request, profile({...request.message.profile, revision: 4})); await pending;
+  assert.equal(app.element('promptDisplayName').value, '新しい名前');
+  assert.equal(app.element('promptDisplayNameSave').hidden, true);
+  assert.equal(app.element('promptDisplayNameSaveStatus').textContent, '保存しました。');
+  assert.equal(app.element('promptGenerated').value, '未保存の本文');
+  assert.equal(app.element('promptGeneratedSave').hidden, false);
+  const second = app.element('promptGeneratedSave').dispatch('click');
+  const next = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(next.message.profile.revision, 4);
+  assert.equal(next.message.profile.displayName, '新しい名前');
+  assert.equal(next.message.profile.generatedPrompt, '未保存の本文');
+  app.resolve(next, profile({...next.message.profile, revision: 5})); await second;
+  assert.equal(app.element('promptGeneratedSave').hidden, true);
+});
+
+test('individual prompt save retains newer edits while the request is in flight', async () => {
+  const app = harness(profile({fixedPrompt: '旧値', revision: 1})); await flush();
+  app.type('promptFixed', '保存要求した値');
+  const pending = app.element('promptFixedSave').dispatch('click');
+  const request = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(app.element('promptFixedSave').disabled, true);
+  app.type('promptFixed', '保存中に変更した値');
+  app.resolve(request, profile({...request.message.profile, revision: 2})); await pending;
+  assert.equal(app.element('promptFixed').value, '保存中に変更した値');
+  assert.equal(app.element('promptFixedSave').hidden, false);
+  assert.equal(app.element('promptFixedSave').disabled, false);
+  assert.match(app.element('promptFixedSaveStatus').textContent, /未保存/);
+});
+
+test('individual prompt save ignores unrelated invalid drafts and rejects stale revisions', async () => {
+  const app = harness(profile({displayName: '元の名前', revision: 2})); await flush();
+  app.type('promptProfileUrl', '不正なURL');
+  app.lock(true);
+  assert.equal(app.element('promptProfileUrlSave').hidden, false);
+  assert.equal(app.element('promptLockedSave').hidden, false);
+  const pending = app.element('promptLockedSave').dispatch('click');
+  const request = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(request.message.profile.profileUrl, '');
+  assert.equal(request.message.profile.locked, true);
+  app.fail(request, '保存済みの設定が更新されました'); await pending;
+  assert.equal(app.element('promptLocked').checked, true);
+  assert.equal(app.element('promptProfileUrl').value, '不正なURL');
+  assert.match(app.element('promptFeedback').textContent, /未保存/);
+  assert.match(app.element('promptLockedSaveStatus').textContent, /更新されました/);
+});
+
 test('prompt editor is an independent form with explicit labels, limits and a readonly saved preview', () => {
   const mainEnd = markup.indexOf('</form>');
   const promptStart = markup.indexOf('<form id="promptForm">');

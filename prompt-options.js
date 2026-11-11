@@ -4,6 +4,8 @@
     displayName: element('promptDisplayName'), profileUrl: element('promptProfileUrl'),
     generatedPrompt: element('promptGenerated'), fixedPrompt: element('promptFixed'), locked: element('promptLocked')
   };
+  const fieldSaveButtons = Object.fromEntries(Object.keys(fields).map(key => [key, element(`${fields[key].id}Save`)]));
+  const fieldSaveStatus = Object.fromEntries(Object.keys(fields).map(key => [key, element(`${fields[key].id}SaveStatus`)]));
   let loaded = false;
   let baseline = null;
   let editingRevision = 0;
@@ -33,6 +35,11 @@
   }
   function renderControls() {
     element('promptSave').disabled = !loaded || saving;
+    const current = readFields();
+    for (const [key, button] of Object.entries(fieldSaveButtons)) {
+      button.hidden = !baseline || current[key] === baseline[key];
+      button.disabled = !loaded || saving;
+    }
     element('promptResetGenerated').disabled = !loaded || saving || defaultGeneratedPrompt === null;
     element('promptResetFixed').disabled = !loaded || saving || defaultFixedPrompt === null;
     element('promptReload').disabled = saving;
@@ -98,7 +105,7 @@
     if (!result.profile || !Number.isInteger(result.profile.revision) || result.profile.revision < 0) throw new Error('プロンプト設定の応答形式が不正です。');
     return result;
   }
-  function adoptResult(result, {replace = false, unchangedSince = editVersion, savedEdit = false} = {}) {
+  function adoptResult(result, {replace = false, unchangedSince = editVersion, savedEdit = false, savedField = null, submittedValue} = {}) {
     validateResult(result);
     if (savedProfile && result.profile.revision < savedProfile.revision) return false;
     const dirty = isDirty();
@@ -107,7 +114,14 @@
     if (savedEdit || (!dirty && !replace) || (replace && editVersion === unchangedSince)) {
       baseline = editable(result.profile);
       editingRevision = result.profile.revision;
-      if (!savedEdit || editVersion === unchangedSince) {
+      if (savedField) {
+        const field = fields[savedField];
+        const value = savedField === 'locked' ? field.checked : field.value;
+        if (value === submittedValue) {
+          if (savedField === 'locked') field.checked = baseline[savedField];
+          else field.value = baseline[savedField];
+        }
+      } else if (!savedEdit || editVersion === unchangedSince) {
         for (const [key, value] of Object.entries(baseline)) {
           if (key === 'locked') fields[key].checked = value;
           else fields[key].value = value;
@@ -124,8 +138,8 @@
     if (version !== readVersion) return;
     adoptResult(result, {replace, unchangedSince});
   }
-  function payload() {
-    const profile = {...readFields(), revision: editingRevision};
+  function payload(values = readFields()) {
+    const profile = {...values, revision: editingRevision};
     profile.displayName = profile.displayName.trim();
     profile.profileUrl = profile.profileUrl.trim();
     if (profile.displayName.length > 100) throw new Error('表示名は100文字以内で入力してください。');
@@ -143,15 +157,18 @@
     }
     return profile;
   }
-  async function save(version) {
+  async function save(version, savedField = null) {
     if (!loaded || saving) throw new Error('設定の読み込み・保存が終わってから操作してください。');
-    const profile = payload();
+    if (!savedField) for (const status of Object.values(fieldSaveStatus)) status.textContent = '';
+    const current = readFields();
+    const submittedValue = savedField ? current[savedField] : undefined;
+    const profile = payload(savedField ? {...baseline, [savedField]: submittedValue} : current);
     const unchangedSince = editVersion;
     saving = true;
     renderControls();
     try {
       const result = validateResult(await chrome.runtime.sendMessage({type: 'SAVE_PROMPT_PROFILE', profile}));
-      const accepted = adoptResult(result, {unchangedSince, savedEdit: true});
+      const accepted = adoptResult(result, {unchangedSince, savedEdit: true, savedField, submittedValue});
       if (!accepted) throw new Error('保存後に別の設定更新がありました。編集内容を控え、「保存済みを読み直す」で確認してください。');
       feedback(isDirty() ? '保存しました。その後の入力は未保存のまま保持しています。' : 'プロンプト設定を保存しました。', false, version);
     } catch (error) {
@@ -164,13 +181,32 @@
     }
   }
 
-  for (const field of Object.values(fields)) {
-    field.addEventListener(field === fields.locked ? 'change' : 'input', () => {editVersion++; renderControls();});
+  for (const [key, field] of Object.entries(fields)) {
+    field.addEventListener(field === fields.locked ? 'change' : 'input', () => {fieldSaveStatus[key].textContent = ''; editVersion++; renderControls();});
+  }
+  for (const [key, button] of Object.entries(fieldSaveButtons)) {
+    button.addEventListener('click', async () => {
+      if (button.disabled || button.hidden) return;
+      const version = ++actionVersion;
+      const status = fieldSaveStatus[key];
+      status.textContent = '保存しています…';
+      status.className = 'note';
+      try {
+        await save(version, key);
+        status.textContent = readFields()[key] === baseline[key] ? '保存しました。' : '保存後の編集は未保存です。';
+        status.className = 'success';
+      } catch (error) {
+        status.textContent = error.message || '保存できませんでした。';
+        status.className = 'error';
+        feedback(`${error.message} 未保存の内容は保持しています。必要なら内容を控えて「保存済みを読み直す」を押してください。`, true, version);
+      }
+    });
   }
   element('promptResetGenerated').addEventListener('click', () => {
     if (element('promptResetGenerated').disabled) return;
     const version = ++actionVersion;
     fields.generatedPrompt.value = defaultGeneratedPrompt;
+    fieldSaveStatus.generatedPrompt.textContent = '';
     editVersion++;
     renderControls();
     feedback('「生成プロンプト」をGPTの指示に基づく標準の編集方針に戻しました。「プロンプト設定を保存」で適用してください。', false, version);
@@ -179,6 +215,7 @@
     if (element('promptResetFixed').disabled) return;
     const version = ++actionVersion;
     fields.fixedPrompt.value = defaultFixedPrompt;
+    fieldSaveStatus.fixedPrompt.textContent = '';
     editVersion++;
     renderControls();
     feedback('「常に追加する指示」を初期値に戻しました（標準は空欄です）。「プロンプト設定を保存」で適用してください。', false, version);

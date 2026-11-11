@@ -1,6 +1,7 @@
 import { Console } from 'node:console';
 import { pathToFileURL } from 'node:url';
 import { defaultGenerate, GUARD } from './server.mjs';
+import { validInteraction } from './interaction.mjs';
 
 export const HOST_NAME = 'com.backlog_ai.reply';
 export const MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -143,6 +144,7 @@ function validGeneration(message) {
     && (generatingPrompt ? message.mode === undefined && message.backlog === undefined
       : (message.mode === undefined || ['chat', 'agent'].includes(message.mode))
         && (message.mode === 'agent' ? validBacklog(message.backlog) : message.backlog === undefined))
+    && (message.interaction === undefined || (!generatingPrompt && message.mode === 'agent' && validInteraction(message.interaction)))
     && (message.progress === undefined || typeof message.progress === 'boolean')
     && typeof message.prompt === 'string' && message.prompt.trim().length > 0 && message.prompt.length <= MAX_PROMPT
     && (message.model === undefined || (typeof message.model === 'string'
@@ -294,6 +296,7 @@ export function createNativeHost({
       }
       if (message.mode === 'agent') return generateAgent({provider: message.provider, model: message.model || undefined,
         prompt: message.prompt, backlog: message.backlog, signal: controller.signal,
+        ...(message.interaction ? {interaction: message.interaction} : {}),
         ...(message.progress === true ? {onProgress} : {})});
       onProgress({stage: 'generating'});
       return generate({ provider: message.provider, model: message.model || undefined,
