@@ -31,6 +31,7 @@ function background({settings = {}, fetch: handleFetch, native: handleNative, co
   let nextTimerId = 0;
   let accessLevel;
   let now = 1000;
+  let currentTabUrl;
   const clock = {
     now: () => now,
     advance(milliseconds) {
@@ -92,7 +93,7 @@ function background({settings = {}, fetch: handleFetch, native: handleNative, co
     AbortSignal: {timeout: milliseconds => ({milliseconds})},
     setTimeout(callback, milliseconds) {const id = ++nextTimerId; timers.set(id, {callback, at: now + milliseconds}); return id;},
     clearTimeout: id => timers.delete(id),
-    chrome: {runtime, tabs: {sendMessage: async (tabId, message, options) => {
+    chrome: {runtime, tabs: {get: async () => ({url: currentTabUrl}), sendMessage: async (tabId, message, options) => {
       updates.push({tabId, message, options});
       if (tabError) throw new Error('tab closed');
     }}, storage: {local: {
@@ -115,7 +116,10 @@ function background({settings = {}, fetch: handleFetch, native: handleNative, co
     }
   });
   vm.runInContext(backgroundSource, context);
-  return {calls, nativeMessages, updates, ports, data, clock, timers, fireStartup: () => runtime.onStartup.emit(), handle: (message = generation, from = sender) => context.handleMessage(message, from), accessLevel: () => accessLevel};
+  return {calls, nativeMessages, updates, ports, data, clock, timers, fireStartup: () => runtime.onStartup.emit(), handle: (message = generation, from = sender, tabUrl = from.url) => {
+    currentTabUrl = tabUrl;
+    return context.handleMessage(message, {...from, tab: from.tab || {id: 1}});
+  }, accessLevel: () => accessLevel};
 }
 
 function healthReply(message) {return {id: message.id, ok: true, providers: ['copilot', 'codex']};}
@@ -375,9 +379,25 @@ test('untrusted origins, frames, paths and extension callers cannot retrieve key
     'https://example.backlog.com/view/TEST-12/extra', 'https://example.backlog.com/view/TEST-12%2Fother'
   ]) await assert.rejects(app.handle(generation, {...sender, url}), /課題詳細画面/);
   await assert.rejects(app.handle(generation, {...sender, frameId: 1}), /課題詳細画面/);
+  await assert.rejects(app.handle(generation, {...sender, tab: {}}), /課題詳細画面/);
   await assert.rejects(app.handle(generation, {...sender, id: 'different-extension'}), /呼び出し元/);
   assert.equal(app.calls.length, 0);
   assert.equal(app.ports.length, 0);
+});
+
+test('same-document navigation uses the current tab issue and rejects stale or cross-origin requests', async () => {
+  const app = background();
+  const currentUrl = 'https://example.backlog.com/view/TEST-13';
+  const result = await app.handle({...generation, issueKey: 'TEST-13'}, sender, currentUrl);
+  assert.equal(result.issueKey, 'TEST-13');
+  assert.ok(app.calls.some(call => new URL(call.url).pathname === '/api/v2/issues/TEST-13'));
+  const settings = await app.handle({type: 'GET_SETTINGS'}, {...sender, url: 'https://example.backlog.com/projects/TEST'}, currentUrl);
+  assert.equal(settings.provider, 'copilot');
+  const callCount = app.calls.length;
+  await assert.rejects(app.handle(generation, sender, currentUrl), /課題が切り替わりました/);
+  await assert.rejects(app.handle(generation, sender, 'https://other.backlog.com/view/TEST-12'), /課題詳細画面/);
+  await assert.rejects(app.handle(generation, sender, 'https://example.backlog.com/projects/TEST'), /課題詳細画面/);
+  assert.equal(app.calls.length, callCount);
 });
 
 test('settings health check opens one native port, never generates and always disconnects', async () => {

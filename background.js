@@ -265,8 +265,16 @@ async function handleMessage(message, sender) {
       return {providers: Array.isArray(health.providers) ? health.providers.filter(value => ['copilot', 'codex'].includes(value)) : []};
     } finally {connection.close();}
   }
-  const page = parseIssueUrl(sender.url);
-  if (!page || sender.frameId !== 0) throw new Error('対応するBacklogの課題詳細画面で実行してください。');
+  // sender.url identifies the content-script document and can retain its
+  // original URL after Backlog navigates between issues without a page load.
+  // The browser's current tab URL is authoritative for the active issue.
+  if (sender.frameId !== 0 || !Number.isInteger(sender.tab?.id)) throw new Error('対応するBacklogの課題詳細画面で実行してください。');
+  let tab;
+  try {tab = await chrome.tabs.get(sender.tab.id);} catch {throw new Error('対応するBacklogの課題詳細画面で実行してください。');}
+  const page = parseIssueUrl(tab.url);
+  let senderOrigin;
+  try {senderOrigin = new URL(sender.url).origin;} catch { /* Reject invalid document URLs below. */ }
+  if (!page || senderOrigin !== page.origin) throw new Error('対応するBacklogの課題詳細画面で実行してください。');
   const settings = normalizeSettings(await chrome.storage.local.get(SETTINGS_KEYS), page.origin);
   // A Backlog API key is valid only for its own space. Never send it to any
   // other origin, including other Backlog subdomains opened by the user.
@@ -278,7 +286,7 @@ async function handleMessage(message, sender) {
     if (keySpace) void formattingManager.refresh({origin: page.origin, force: false}).catch(() => {});
     return {provider: settings.provider, maxComments: settings.maxComments};
   }
-  if (message.issueKey !== page.issueKey) throw new Error('課題が切り替わりました。ページを再読み込みしてください。');
+  if (message.issueKey !== page.issueKey) throw new Error('課題が切り替わりました。表示中の課題でもう一度生成してください。');
   if (message.provider !== settings.provider) throw new Error('利用するAIが変更されました。もう一度生成してください。');
   const instruction = typeof message.instruction === 'string' ? message.instruction.trim() : '';
   if (!instruction || instruction.length > 10000) throw new Error('伝えたい内容を1〜10,000文字で入力してください。');

@@ -26,6 +26,7 @@
   let lastPath = location.pathname;
   let navigationVersion = 0;
   let task = null;
+  let pendingComment = null;
   let panelCollapsed = restored ? restored.collapsed : true;
   let provider = 'copilot';
   let uiStatus = {path: lastPath, text: '', kind: ''};
@@ -157,6 +158,48 @@
   }
   function editorText(editor) {
     return String(editor.matches('textarea,input') ? editor.value : editor.innerText).replace(/\r\n?/g, '\n');
+  }
+  // Backlog posts comments itself. Wait for its editor to clear after a submit
+  // rather than collapsing on the click, which could fail validation or posting.
+  function watchCommentSubmit(event) {
+    const editor = findEditor();
+    const form = editor?.closest('form');
+    if (!form || !editorText(editor).trim()) return;
+    if (event.type === 'submit' && event.target !== form) return;
+    const button = event.type === 'submit' ? event.submitter : event.target?.closest?.('button, input[type="submit"]');
+    if (!button || !form.contains(button)) return;
+    const label = (button.textContent || button.value || button.getAttribute('aria-label') || '').trim();
+    if (!/^(?:コメントを?)?(?:登録|投稿|追加)(?:する)?$/.test(label)) {
+      // A toolbar click while posting must not cancel the pending operation.
+      // A preview submission is a distinct form action, however, so its later
+      // editor changes cannot be treated as confirmation of the earlier post.
+      if (event.type === 'submit' && /プレビュー|preview/i.test(label)) pendingComment = null;
+      return;
+    }
+    pendingComment = {path: location.pathname, editor, startedAt: performance.now()};
+  }
+  function checkCommentPosted() {
+    if (!pendingComment) return;
+    const pending = pendingComment;
+    if (location.pathname !== pending.path || performance.now() - pending.startedAt > 30000) {
+      pendingComment = null;
+      return;
+    }
+    const editor = findEditor();
+    // An editor replacement can be a failed post or an unrelated UI change.
+    // Only a clear of the editor that was submitted is evidence of completion.
+    if (!pending.editor.isConnected || (editor && editor !== pending.editor)) {
+      pendingComment = null;
+      return;
+    }
+    if (editor === pending.editor && !editorText(editor).trim()) {
+      pendingComment = null;
+      panelCollapsed = true;
+      renderState();
+    }
+  }
+  function cancelCommentWatchOnInput(event) {
+    if (pendingComment && event.isTrusted && event.target === pendingComment.editor) pendingComment = null;
   }
   function comparableEditorText(value) {
     // Paragraph-based editors can add blank lines and non-breaking spaces to
@@ -363,6 +406,7 @@
   function mount() {
     if (disposed) return;
     checkNavigation();
+    checkCommentPosted();
     if (!issueKey()) {removePanel(); return;}
     const editor = findEditor();
     if (!editor) {removePanel(); return;}
@@ -506,10 +550,13 @@
       }
     });
   }
-  observer = new MutationObserver(() => {if (disposed) return; checkNavigation(); if (issueKey() && !document.getElementById('bcr-root')) mount();});
+  observer = new MutationObserver(() => {if (disposed) return; checkNavigation(); checkCommentPosted(); if (issueKey() && !document.getElementById('bcr-root')) mount();});
   observer.observe(document.documentElement, {childList: true, subtree: true});
   window.addEventListener('popstate', mount);
   window.addEventListener('focus', reconnectOnReturn);
+  document.addEventListener('submit', watchCommentSubmit, true);
+  document.addEventListener('click', watchCommentSubmit, true);
+  document.addEventListener('input', cancelCommentWatchOnInput, true);
   document.addEventListener('visibilitychange', reconnectOnReturn);
   document.addEventListener('backlog-ai-dispose', function dispose() {
     disposed = true;
@@ -517,6 +564,9 @@
     intervals.forEach(clearInterval);
     window.removeEventListener('popstate', mount);
     window.removeEventListener('focus', reconnectOnReturn);
+    document.removeEventListener('submit', watchCommentSubmit, true);
+    document.removeEventListener('click', watchCommentSubmit, true);
+    document.removeEventListener('input', cancelCommentWatchOnInput, true);
     document.removeEventListener('visibilitychange', reconnectOnReturn);
     try {chrome.runtime.onMessage.removeListener(onMessage);} catch { /* Context may already be invalidated. */ }
     removePanel();

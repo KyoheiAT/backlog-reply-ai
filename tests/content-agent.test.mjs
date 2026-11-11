@@ -191,6 +191,18 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
     reinject() {vm.runInContext(source, context);},
     ping() {let response; progressListener({type: 'BACKLOG_AI_PING'}, {id: 'test-extension'}, result => {response = result;}); return response;},
     control: selector => root.querySelector(selector), mutate: () => mutationCallback(),
+    commentForm() {
+      const form = {contains: node => node === editor || node?.form === form};
+      editor.closest = selector => selector === 'form' ? form : null;
+      const button = {form, textContent: '登録', closest: () => button};
+      return {
+        submit: () => document.dispatchEvent(new TestEvent('submit', {target: form, submitter: button})),
+        click: () => document.dispatchEvent(new TestEvent('click', {target: button})),
+        otherSubmit: () => document.dispatchEvent(new TestEvent('submit', {target: form, submitter: {...button, textContent: 'プレビュー'}})),
+        toolbarClick: () => document.dispatchEvent(new TestEvent('click', {target: {closest: () => ({form, textContent: '太字'})}})),
+        input: () => document.dispatchEvent(new TestEvent('input', {target: editor, isTrusted: true}))
+      };
+    },
     type(selector, value) {const control = root.querySelector(selector); control.value = value; control.trigger(selector === '.bcr-mode' ? 'change' : 'input');},
     includeProject(checked) {const control = root.querySelector('.bcr-include-project'); control.checked = checked; control.trigger('change');},
     submit: () => root.querySelector('.bcr-generate').trigger('click'),
@@ -209,6 +221,60 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
     navigate(path) {location.pathname = path; mutationCallback();}
   };
 }
+
+test('the AI panel collapses only after a submitted comment editor clears', async () => {
+  const app = harness();
+  await flush();
+  const form = app.commentForm();
+  app.toggle();
+  app.editor.value = '投稿するコメント';
+  form.click();
+  app.mutate();
+  assert.equal(app.control('.bcr-body').hidden, false, 'a click alone does not prove success');
+  form.toolbarClick();
+  app.editor.value = '';
+  app.mutate();
+  assert.equal(app.control('.bcr-body').hidden, true, 'unrelated toolbar clicks do not cancel a pending post');
+  assert.equal(app.control('.bcr-toggle').getAttribute('aria-expanded'), 'false');
+
+  app.toggle();
+  app.editor.value = '別のコメント';
+  form.submit();
+  app.editor.value = '';
+  form.input();
+  app.mutate();
+  assert.equal(app.control('.bcr-body').hidden, false, 'manual edits do not count as a completed post');
+
+  app.editor.value = 'プレビューするコメント';
+  form.submit();
+  form.otherSubmit();
+  app.editor.value = '';
+  app.mutate();
+  assert.equal(app.control('.bcr-body').hidden, false, 'preview submission is not a comment post');
+
+  app.editor.value = '失敗したコメント';
+  form.submit();
+  app.advance(31000);
+  app.editor.value = '';
+  app.mutate();
+  assert.equal(app.control('.bcr-body').hidden, false, 'an old submit cannot collapse the panel later');
+});
+
+test('replacing a submitted editor with a blank editor does not imply the post succeeded', async () => {
+  const app = harness();
+  await flush();
+  const form = app.commentForm();
+  app.toggle();
+  app.editor.value = '投稿に失敗したコメント';
+  form.submit();
+  const replacement = app.replaceEditor();
+  assert.equal(replacement.value, '');
+  app.mutate();
+  assert.equal(app.control('.bcr-body').hidden, false, 'a different empty editor is not proof of success');
+  app.editor.value = '';
+  app.mutate();
+  assert.equal(app.control('.bcr-body').hidden, false, 'the abandoned submission cannot collapse the panel later');
+});
 function descendants(element, tag) {
   return element.children.flatMap(child => [...(child.tagName === tag.toUpperCase() ? [child] : []), ...descendants(child, tag)]);
 }
