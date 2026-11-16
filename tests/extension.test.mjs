@@ -413,7 +413,7 @@ test('agent scope accepts current and referenced project keys starting with a di
 });
 
 test('native messaging permissions exclude localhost, unrelated websites and Anthropic', () => {
-  assert.equal(manifest.version, '1.4.0');
+  assert.equal(manifest.version, '1.4.1');
   assert.deepEqual(manifest.permissions, ['storage', 'nativeMessaging', 'scripting']);
   assert.deepEqual(manifest.content_scripts[0].js, ['panel-layout.js', 'vendor/marked/marked.umd.js', 'chat-markdown.js', 'content.js']);
   assert.ok(!manifest.host_permissions.some(value => value === 'https://*/*' || value.includes('anthropic') || value.includes('127.0.0.1') || value.includes('localhost')));
