@@ -66,6 +66,30 @@ test('API login is rejected before a model request or forced-login configuration
   await assert.rejects(access(calls[0].options.cwd), { code: 'ENOENT' });
 });
 
+test('preparation checks login without generation and the next call consumes its workspace', async () => {
+  const {generate, calls} = setup([loggedIn, child => {
+    child.stdout.end(reply('prepared reply') + complete);
+    child.emit('close', 0);
+  }]);
+  await Promise.all([generate.prepare(), generate.prepare()]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, ['--no-daemon', 'login', 'status']);
+  assert.equal(calls[0].input, '');
+  const directory = calls[0].options.cwd;
+  assert.equal(await generate({prompt: 'draft'}), 'prepared reply');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].options.cwd, directory);
+  await assert.rejects(access(directory), {code: 'ENOENT'});
+});
+
+test('abandoned Codex preparation removes its workspace without an exec call', async () => {
+  const {generate, calls} = setup([loggedIn]);
+  await generate.prepare();
+  await generate.disposePrepared();
+  assert.equal(calls.length, 1);
+  await assert.rejects(access(calls[0].options.cwd), {code: 'ENOENT'});
+});
+
 test('a failed turn never returns its partial draft, and raw errors are not disclosed', async () => {
   const { generate } = setup([loggedIn, child => {
     child.stdout.end(reply('未完成') + JSON.stringify({ type: 'turn.failed', error: { message: 'private token XYZ' } }) + '\n');

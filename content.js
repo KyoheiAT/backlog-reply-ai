@@ -11,7 +11,8 @@
     mode: previousRoot.querySelector('.bcr-mode')?.value === 'agent' ? 'agent' : 'chat',
     includeCurrentProject: previousRoot.querySelector('.bcr-include-project')?.checked !== false,
     interactive: previousRoot.querySelector('.bcr-interactive')?.checked === true,
-    collapsed: previousRoot.classList.contains('bcr-collapsed')
+    collapsed: previousRoot.classList.contains('bcr-collapsed'),
+    inputOnly: previousRoot.classList.contains('bcr-input-only')
   } : null;
   // A recovery injection replaces only this extension's UI/listeners. Preserve
   // unfinished instructions and leave Backlog's comment draft untouched.
@@ -23,6 +24,7 @@
   let observer;
   const intervals = [];
   let settingsPending = null;
+  const connectionPreparations = new Map();
   let connectionFailed = false;
   let lastReconnectAt = -Infinity;
   let lastPath = location.pathname;
@@ -30,6 +32,7 @@
   let task = null;
   let pendingComment = null;
   let panelCollapsed = restored ? restored.collapsed : true;
+  let panelInputOnly = restored ? restored.inputOnly : true;
   let provider = 'copilot';
   let uiStatus = {path: lastPath, text: '', kind: ''};
   // Keep drafts only in this page's memory, including when Backlog remounts its editor.
@@ -242,6 +245,9 @@
     const elapsed = root.querySelector('.bcr-elapsed');
     const text = `${running ? '経過' : '所要'} ${seconds(tenths(milliseconds))} 秒`;
     if (elapsed.textContent !== text) elapsed.textContent = text;
+    const statusElapsed = root.querySelector('.bcr-status-elapsed');
+    statusElapsed.hidden = !currentTask && (!!task || draft.progress.length === 0);
+    if (statusElapsed.textContent !== text) statusElapsed.textContent = text;
     const rows = root.querySelector('.bcr-progress-list').children;
     for (let index = 0; index < draft.progress.length; index++) {
       const entry = draft.progress[index];
@@ -439,6 +445,12 @@
     root.classList.toggle('bcr-collapsed', panelCollapsed);
     root.querySelector('.bcr-body').hidden = panelCollapsed;
     root.querySelector('.bcr-heading').hidden = panelCollapsed;
+    root.querySelector('.bcr-mode-control').hidden = panelCollapsed;
+    root.classList.toggle('bcr-input-only', panelInputOnly);
+    const inputOnlyToggle = root.querySelector('.bcr-input-only-toggle');
+    inputOnlyToggle.hidden = panelCollapsed;
+    inputOnlyToggle.textContent = panelInputOnly ? '詳細を表示' : '詳細を非表示';
+    inputOnlyToggle.setAttribute('aria-expanded', String(!panelInputOnly));
     const toggle = root.querySelector('.bcr-toggle');
     const currentStatus = uiStatus.path === location.pathname;
     const compactStatus = task ? '生成中…' : currentStatus && uiStatus.kind === 'error' ? '要確認' : currentStatus && uiStatus.kind === 'ok' ? '完了' : '';
@@ -543,6 +555,22 @@
     lastReconnectAt = performance.now();
     void refreshSettings().catch(error => {if (!disposed && !task) setStatus(location.pathname, error.message, 'error');});
   }
+  function prepareConnection() {
+    const currentIssue = issueKey();
+    if (disposed || task || !currentIssue || document.visibilityState === 'hidden') return;
+    const path = location.pathname;
+    const previous = connectionPreparations.get(path);
+    const startedAt = performance.now();
+    if (previous && (previous.pending || startedAt - previous.startedAt < 30000)) return;
+    const preparation = {startedAt, pending: true};
+    connectionPreparations.set(path, preparation);
+    // Prepare only the connection. Draft text stays on the page until Send.
+    // Speculative failures must not interrupt writing or replace UI status.
+    try {
+      void Promise.resolve(chrome.runtime.sendMessage({type: 'PREPARE_REPLY', issueKey: currentIssue}))
+        .catch(() => {}).finally(() => {preparation.pending = false;});
+    } catch {preparation.pending = false;}
+  }
   function removePanel() {
     panelLayout?.destroy();
     panelLayout = null;
@@ -584,18 +612,24 @@
     root.innerHTML = `
       <div class="bcr-header">
         <div class="bcr-heading bcr-title" hidden>AI返信アシスタント <span class="bcr-provider"></span></div>
-        <button class="bcr-toggle" type="button" aria-expanded="false" aria-controls="bcr-body" aria-label="AI返信アシスタントを開く">AI返信</button>
+        <div class="bcr-header-actions">
+          <div class="bcr-mode-control" hidden>
+            <label class="bcr-visually-hidden" for="bcr-mode">作成モード</label>
+            <select id="bcr-mode" class="bcr-mode" aria-describedby="bcr-mode-note" title="作成モード">
+              <option value="chat">通常の返信作成</option>
+              <option value="agent">エージェント</option>
+            </select>
+          </div>
+          <button class="bcr-input-only-toggle" type="button" aria-expanded="false" aria-controls="bcr-context bcr-dialogue-controls bcr-results" hidden>詳細を表示</button>
+          <button class="bcr-toggle" type="button" aria-expanded="false" aria-controls="bcr-body" aria-label="AI返信アシスタントを開く">AI返信</button>
+        </div>
         <span class="bcr-compact-status bcr-visually-hidden" role="status" aria-live="polite"></span>
       </div>
       <div id="bcr-body" class="bcr-body" hidden>
-      <p class="bcr-note">課題本文・コメント・指定した情報と入力した指示を、表示中のAIへ送信して返信案を作成します。</p>
       <fieldset class="bcr-fields">
         <legend class="bcr-visually-hidden">返信案の作成条件</legend>
-        <label class="bcr-label" for="bcr-mode">作成モード</label>
-        <select id="bcr-mode" class="bcr-mode" aria-describedby="bcr-mode-note">
-          <option value="chat">通常の返信作成</option>
-          <option value="agent">エージェント（Backlog MCPで調査）</option>
-        </select>
+        <div id="bcr-context" class="bcr-secondary">
+        <p class="bcr-note">課題本文・コメント・指定した情報と入力した指示を、表示中のAIへ送信して返信案を作成します。</p>
         <p id="bcr-mode-note" class="bcr-note bcr-mode-note"></p>
         <div class="bcr-agent-options" hidden>
           <label class="bcr-checkbox" for="bcr-interactive"><input id="bcr-interactive" class="bcr-interactive" type="checkbox">対話しながら返信を考える</label>
@@ -614,14 +648,18 @@
           <p class="bcr-empty-dialogue bcr-note">調べてほしいことや伝えたいことを入力して、AIに相談しましょう。</p>
           <ol class="bcr-dialogue-list" aria-label="AIとの会話" aria-live="polite"></ol>
         </div>
+        </div>
         <label class="bcr-label bcr-instruction-label" for="bcr-instruction">今回伝えたい内容</label>
         <div class="bcr-composer">
           <textarea id="bcr-instruction" class="bcr-instruction" maxlength="10000" placeholder="例：修正が完了したので、関連課題の状況も踏まえて確認をお願いしたい"></textarea>
           <button class="bcr-generate" type="button">AIで返信文を生成</button>
         </div>
         <p class="bcr-chat-hint" hidden>Enterで送信、Shift + Enterで改行</p>
-        <span class="bcr-status" role="status" aria-live="polite"></span>
-        <div class="bcr-dialogue-controls" hidden>
+        <div class="bcr-status-row">
+          <span class="bcr-status" role="status" aria-live="polite"></span>
+          <span class="bcr-status-elapsed" role="timer" aria-live="off" hidden></span>
+        </div>
+        <div id="bcr-dialogue-controls" class="bcr-dialogue-controls bcr-secondary" hidden>
           <label class="bcr-label" for="bcr-draft-instruction">文案作成時の追加指示（任意）</label>
           <textarea id="bcr-draft-instruction" class="bcr-draft-instruction" maxlength="4000" placeholder="例：要点を3つにまとめ、丁寧な文体で"></textarea>
           <div class="bcr-dialogue-actions"><button class="bcr-create-draft" type="button">会話から返信文案を作成</button><button class="bcr-clear-dialogue" type="button">会話を最初から</button></div>
@@ -634,12 +672,14 @@
           </div>
         </div>
       </fieldset>
+      <div id="bcr-results" class="bcr-secondary">
       <section class="bcr-progress" aria-label="作業ログ" hidden>
         <div class="bcr-progress-heading">作業ログ <span class="bcr-elapsed"></span></div>
         <p class="bcr-progress-note">「+」は生成開始からの経過、所要は次のログまでの時間です。</p>
         <ol class="bcr-progress-list"></ol>
       </section>
       <details class="bcr-sources" aria-label="直近の生成で参照した情報" hidden></details>
+      </div>
       </div>`;
     editor.parentElement?.insertBefore(root, editor);
     root.bcrDrafts = drafts;
@@ -655,7 +695,14 @@
     root.querySelector('.bcr-references').value = draft.references;
     root.querySelector('.bcr-include-project').checked = draft.includeCurrentProject;
     root.querySelector('.bcr-interactive').checked = draft.interactive;
-    for (const selector of ['.bcr-instruction', '.bcr-draft-instruction', '.bcr-references']) root.querySelector(selector).addEventListener('input', () => {saveDraft(root, mountedPath);});
+    for (const selector of ['.bcr-instruction', '.bcr-draft-instruction', '.bcr-references']) {
+      const input = root.querySelector(selector);
+      input.addEventListener('input', () => {
+        saveDraft(root, mountedPath);
+        if (selector !== '.bcr-references') prepareConnection();
+      });
+      if (selector !== '.bcr-references') input.addEventListener('focus', prepareConnection);
+    }
     root.querySelector('.bcr-mode').addEventListener('change', () => {saveDraft(root, mountedPath); renderState();});
     root.querySelector('.bcr-include-project').addEventListener('change', () => {saveDraft(root, mountedPath); renderModeNote(root);});
     root.querySelector('.bcr-interactive').addEventListener('change', () => {saveDraft(root, mountedPath); renderState();});
@@ -668,6 +715,10 @@
     root.querySelector('.bcr-sources').addEventListener('toggle', event => {getDraft(mountedPath).sourcesOpen = event.currentTarget.open;});
     root.querySelector('.bcr-toggle').addEventListener('click', () => {
       panelCollapsed = !panelCollapsed;
+      renderState();
+    });
+    root.querySelector('.bcr-input-only-toggle').addEventListener('click', () => {
+      panelInputOnly = !panelInputOnly;
       renderState();
     });
     renderState();
@@ -780,6 +831,9 @@
           }
         }
         draft.elapsedMs = taskElapsed(currentTask);
+        // The request consumed its prepared connection. Allow the next turn
+        // to prepare immediately, even when this generation finished quickly.
+        connectionPreparations.delete(currentTask.path);
         task = null;
         renderState(); // Also resets a panel remounted while the request was running.
       }

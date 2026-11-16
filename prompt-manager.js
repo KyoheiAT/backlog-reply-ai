@@ -4,10 +4,14 @@
   const KEY = 'promptProfile';
   const DEFAULT_GENERATED_PROMPT = root.BacklogPromptDefaults?.generatedPrompt;
   const DEFAULT_FIXED_PROMPT = root.BacklogPromptDefaults?.fixedPrompt;
+  const DEFAULT_KNOWLEDGE = root.BacklogPromptDefaults?.knowledge;
+  const MAX_KNOWLEDGE = 30000;
   if (typeof DEFAULT_GENERATED_PROMPT !== 'string' || !DEFAULT_GENERATED_PROMPT.trim()
     || DEFAULT_GENERATED_PROMPT.length > 10000 || DEFAULT_GENERATED_PROMPT.includes('\u0000')
     || typeof DEFAULT_FIXED_PROMPT !== 'string'
-    || DEFAULT_FIXED_PROMPT.length > 10000 || DEFAULT_FIXED_PROMPT.includes('\u0000')) {
+    || DEFAULT_FIXED_PROMPT.length > 10000 || DEFAULT_FIXED_PROMPT.includes('\u0000')
+    || typeof DEFAULT_KNOWLEDGE !== 'string'
+    || DEFAULT_KNOWLEDGE.length > MAX_KNOWLEDGE || DEFAULT_KNOWLEDGE.includes('\u0000')) {
     throw new Error('標準プロンプトを読み込めませんでした。拡張機能を再読み込みしてください。');
   }
   const SUPPLEMENT_HEADING = '\n\n【本人情報・Backlog公式ガイドの補足】\n';
@@ -72,11 +76,15 @@
       ? value.fixedPrompt : DEFAULT_FIXED_PROMPT;
     const generatedPrompt = typeof value.generatedPrompt === 'string' && value.generatedPrompt.length <= 12000 && !value.generatedPrompt.includes('\u0000')
       ? value.generatedPrompt : DEFAULT_GENERATED_PROMPT;
+    // Missing legacy knowledge receives the bundled reference. An explicit empty
+    // string disables knowledge and must survive saves and regeneration.
+    const knowledge = typeof value.knowledge === 'string' && value.knowledge.length <= MAX_KNOWLEDGE && !value.knowledge.includes('\u0000')
+      ? value.knowledge : DEFAULT_KNOWLEDGE;
     let url = '';
     try {url = profileUrl(value.profileUrl ?? '');} catch {}
     return {
       displayName: safeText('displayName', 100).trim(), profileUrl: url,
-      generatedPrompt, fixedPrompt, fixedPromptInitialized: true,
+      generatedPrompt, fixedPrompt, fixedPromptInitialized: true, knowledge,
       locked: value.locked === true,
       revision: Number.isSafeInteger(value.revision) && value.revision >= 0 ? value.revision : 0,
       generatedAt: iso(value.generatedAt), checkedAt: iso(value.checkedAt),
@@ -96,7 +104,7 @@
   }
 
   function sameInput(current, initial) {
-    return ['revision', 'displayName', 'profileUrl', 'generatedPrompt', 'fixedPrompt', 'locked']
+    return ['revision', 'displayName', 'profileUrl', 'generatedPrompt', 'fixedPrompt', 'knowledge', 'locked']
       .every(key => current[key] === initial[key]);
   }
 
@@ -237,6 +245,7 @@
         if (own(input, 'profileUrl')) next.profileUrl = profileUrl(input.profileUrl);
         if (own(input, 'generatedPrompt')) next.generatedPrompt = boundedText(input.generatedPrompt, 12000, '自動生成プロンプト');
         if (own(input, 'fixedPrompt')) next.fixedPrompt = boundedText(input.fixedPrompt, 10000, '固定プロンプト');
+        if (own(input, 'knowledge')) next.knowledge = boundedText(input.knowledge, MAX_KNOWLEDGE, '知識');
         if (own(input, 'locked')) {
           if (typeof input.locked !== 'boolean') throw failure('INVALID_PROFILE', 'ロック設定を確認してください。');
           next.locked = input.locked;

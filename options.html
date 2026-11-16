@@ -67,7 +67,7 @@
     </fieldset>
   </form>
   <section class="prompt-section" aria-labelledby="promptHeading">
-    <h2 id="promptHeading">共通プロンプトと本人情報</h2>
+    <h2 id="promptHeading">共通プロンプト・知識・本人情報</h2>
     <p class="info">生成プロンプトは、GPTの指示を基にした標準の編集方針と、本人情報・Backlog公式ガイドの補足をまとめた主プロンプトです。表示名を登録すると、Chrome起動時に保存済みのAI・モデルで補足を再生成します。標準の編集方針の全文は再生成でも維持します。生成するたびに契約の利用枠を消費します。以下の設定は、上のAI・APIキー設定とは別に保存します。</p>
     <p class="note">参照するのは公式の5記事です。「課題と状態」「お知らせ機能の概要」「プロジェクトの基本設定」と、Backlog記法・Markdown記法のガイドを使います。</p>
     <form id="promptForm">
@@ -85,6 +85,10 @@
       <div class="setting-control"><textarea id="promptFixed" rows="6" maxlength="10000" placeholder="必要な場合だけ、用語や文体の個別ルールを追加してください。" aria-describedby="promptFixedNote"></textarea><button type="button" id="promptFixedSave" class="prompt-inline-save" hidden disabled>保存</button><span id="promptFixedSaveStatus" class="inline-status" role="status" aria-live="polite"></span></div>
       <button id="promptResetFixed" class="prompt-secondary" type="button" aria-describedby="promptFixedNote" disabled>追加指示を空に戻す</button>
       <p id="promptFixedNote" class="note">初期値は空欄です。基本の編集方針は生成プロンプトに含まれているため、この欄には個別の補足だけを記入します。「追加指示を空に戻す」はこの欄だけを初期値に戻します。変更後は「プロンプト設定を保存」で適用してください。保存後は毎回の返信作成に追加し、自動・手動の再生成では変更しません。共通の安全ルールも引き続き適用します。</p>
+      <label for="promptKnowledge">知識（文例・言い換え・参考資料）</label>
+      <div class="setting-control"><textarea id="promptKnowledge" rows="12" maxlength="30000" aria-describedby="promptKnowledgeNote"></textarea><button type="button" id="promptKnowledgeSave" class="prompt-inline-save" hidden disabled>保存</button><span id="promptKnowledgeSaveStatus" class="inline-status" role="status" aria-live="polite"></span></div>
+      <button id="promptResetKnowledge" class="prompt-secondary" type="button" aria-describedby="promptKnowledgeNote" disabled>知識をデフォルトに戻す</button>
+      <p id="promptKnowledgeNote" class="note">標準の知識は knowledge_soft_japanese_templates.txt の全文です。プロンプトの指示とは分けて保存し、返信作成・文章整形の参考資料として使います。文例や用語集を30,000文字まで編集・貼り付けできます。空欄で保存すると知識を使いません。再生成でもこの欄は変更しません。「知識をデフォルトに戻す」はこの欄だけを戻します。変更後は保存して適用してください。</p>
       <p class="note">標準では、完成文を外側のコードブロックで囲まず、コメント欄にそのまま使える文面を出力します。</p>
       <div class="prompt-actions">
         <button id="promptSave" type="submit" disabled>プロンプト設定を保存</button>
@@ -100,7 +104,10 @@
     <label for="promptEffective">保存済みの共通プロンプト全体（読み取り専用）</label>
     <textarea id="promptEffective" rows="12" readonly aria-describedby="promptEffectiveNote"></textarea>
     <p id="promptEffectiveNote" class="note">共通ルール、本人情報、生成プロンプト、常に追加する指示を合成した内容です。未保存の編集は反映しません。生成中も編集・保存・固定ができます。生成開始後に設定を保存した場合、その古い設定に基づく生成結果は採用しません。</p>
-    <p class="note">公式ガイドの取得にBacklog APIキーは使いません。表示名・プロフィールURL・プロンプト設定は、このChromeのローカル拡張ストレージに保存します。</p>
+    <label for="promptKnowledgeSaved">保存済みの知識（読み取り専用）</label>
+    <textarea id="promptKnowledgeSaved" rows="8" readonly aria-describedby="promptKnowledgeSavedNote"></textarea>
+    <p id="promptKnowledgeSavedNote" class="note">AIに参考資料として渡す保存済みの知識です。上の共通プロンプトには混ぜず、別に送信します。未保存の編集は反映しません。</p>
+    <p class="note">公式ガイドの取得にBacklog APIキーは使いません。表示名・プロフィールURL・プロンプト・知識は、このChromeのローカル拡張ストレージに保存します。</p>
   </section>
   <h2>初回だけ行うローカル接続の登録</h2>
   <p>この拡張のID: <code id="extensionId"></code></p>
@@ -109,7 +116,7 @@
   <p class="info">登録後は生成ボタンを押すだけです。Chromeが必要なときに接続プログラムを起動し、処理後に接続を終了します。毎回のコマンド実行やターミナルの起動は不要です。</p>
   <button id="checkBridge" type="button">自動起動と接続をテスト</button><p id="connectionStatus" role="status" aria-live="polite"></p>
   <p class="note">接続テストはローカル接続の起動と通信だけを確認し、終了します。AIへのログイン・利用上限の確認や文章生成は行いません。</p>
-  <p class="note">生成時に課題本文・コメント・指示を選択したAIへ送信します。業務データの取り扱い方針を確認して利用してください。コメントは自動投稿しません。</p>
+  <p class="note">生成時に課題本文・コメント・指示・保存済みの知識を選択したAIへ送信します。業務データの取り扱い方針を確認して利用してください。コメントは自動投稿しません。</p>
   <script src="backlog-credentials.js"></script>
   <script src="options.js"></script>
   <script src="prompt-options.js"></script>

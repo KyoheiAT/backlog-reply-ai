@@ -142,13 +142,19 @@ test('abort kills owned app-server and removes temporary directory', async () =>
   await assert.rejects(access(calls[1].options.cwd), { code: 'ENOENT' });
 });
 
-test('whole-operation timeout includes a stalled initialization', async () => {
-  const keepAlive = setInterval(() => {}, 1000);
-  try {
-    const { list, calls } = setup(() => {}, { onInitialize: () => {}, timeoutMs: 20 });
-    await assert.rejects(list(), /タイムアウト/);
-    await assert.rejects(access(calls[1].options.cwd), { code: 'ENOENT' });
-  } finally { clearInterval(keepAlive); }
+test('whole-operation timeout includes a stalled initialization', async t => {
+  t.mock.timers.enable({apis: ['setTimeout']});
+  let initialized;
+  const initialization = new Promise(resolve => {initialized = resolve;});
+  const { list, calls, messages } = setup(() => {}, {onInitialize: initialized, timeoutMs: 20});
+  const rejected = assert.rejects(list(), /タイムアウト/);
+  // Wait for the intended stalled stage before advancing the clock; slow
+  // temporary-directory creation must not turn this into a pre-start timeout.
+  await initialization;
+  t.mock.timers.tick(20);
+  await rejected;
+  assert.deepEqual(messages.map(message => message.method), ['initialize']);
+  await assert.rejects(access(calls[1].options.cwd), {code: 'ENOENT'});
 });
 
 test('pre-aborted requests do not start a process', async () => {

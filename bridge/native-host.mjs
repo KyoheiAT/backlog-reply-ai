@@ -11,11 +11,28 @@ const MAX_GENERATED_PROMPT = 12_000;
 const MAX_REQUESTS = 10_000;
 const GENERATION_TIMEOUT_MS = 180_000;
 const MODEL_TIMEOUT_MS = 45_000;
+const PREPARATION_TIMEOUT_MS = 20_000;
 const CANCELLED = '生成が中断またはタイムアウトしました。ログイン状態と利用上限を確認してください。';
 const PROGRESS_STAGES = new Set(['agent_connecting', 'planning', 'reading', 'read_complete', 'read_failed',
   'drafting', 'reply_ready', 'duplicate', 'format_retry', 'generating']);
 const PROGRESS_TOOLS = new Set(['get_project', 'get_issues', 'get_issue', 'get_issue_comments']);
 const MAX_PROGRESS_EVENTS = 64;
+const preparedProviders = new Set();
+
+export async function defaultPrepareProvider({provider, signal}) {
+  const generator = provider === 'copilot'
+    ? (await import('./providers/copilot.mjs')).generateCopilot
+    : provider === 'codex' ? (await import('./providers/codex.mjs')).generateCodex : null;
+  if (!generator) throw new Error('利用するAIが不正です。');
+  preparedProviders.add(generator);
+  await generator.prepare({signal});
+}
+
+async function defaultDisposePrepared() {
+  const providers = [...preparedProviders];
+  preparedProviders.clear();
+  await Promise.allSettled(providers.map(generator => generator.disposePrepared()));
+}
 
 export async function defaultListModels({ provider, signal }) {
   if (provider === 'copilot') {
@@ -172,7 +189,9 @@ function safeProgress(event, apiKey) {
 export function createNativeHost({
   extensionId, callerOrigin, input = process.stdin, output = process.stdout,
   errorOutput = process.stderr, generate = defaultGenerate, listModels = defaultListModels, generateAgent = defaultGenerateAgent,
+  prepareProvider = defaultPrepareProvider, disposePrepared = defaultDisposePrepared,
   timeoutMs = GENERATION_TIMEOUT_MS, modelTimeoutMs = MODEL_TIMEOUT_MS, cleanupTimeoutMs = 30_000,
+  preparationTimeoutMs = PREPARATION_TIMEOUT_MS,
 } = {}) {
   validateCaller(extensionId, callerOrigin);
   const seen = new Set();
@@ -197,7 +216,7 @@ export function createNativeHost({
     void (async () => {
       let cleanupTimer;
       const cleaned = await Promise.race([
-        Promise.allSettled([...active.values()].map(job => job.operation)).then(() => true),
+        Promise.allSettled([...active.values()].map(job => job.operation).concat(Promise.resolve().then(disposePrepared))).then(() => true),
         new Promise(resolve => { cleanupTimer = setTimeout(() => resolve(false), cleanupTimeoutMs); }),
       ]);
       clearTimeout(cleanupTimer);
@@ -251,6 +270,10 @@ export function createNativeHost({
     seen.add(message.id);
     if (message.type === 'health') {
       send({ id: message.id, ok: true, providers: ['copilot', 'codex'] });
+    } else if (message.type === 'prepare' && ['copilot', 'codex'].includes(message.provider)
+      && Object.keys(message).every(key => ['id', 'type', 'provider'].includes(key))) {
+      if (active.size >= 2) send({id: message.id, ok: false, error: '処理が混み合っています。しばらく待ってから再実行してください。'});
+      else startOperation(message, false);
     } else if (message.type === 'models' && ['copilot', 'codex'].includes(message.provider)) {
       if (active.size >= 2) send({ id: message.id, ok: false, error: '処理が混み合っています。しばらく待ってから再実行してください。' });
       else startOperation(message, true);
@@ -267,10 +290,11 @@ export function createNativeHost({
   function startOperation(message, listing) {
     const controller = new AbortController();
     const generatingPrompt = message.type === 'generate_prompt';
+    const preparing = message.type === 'prepare';
     let progressEnded = false;
     let progressCount = 0;
     const onProgress = event => {
-      if (listing || message.progress !== true || progressEnded || closing || controller.signal.aborted || progressCount >= MAX_PROGRESS_EVENTS) return;
+      if (listing || preparing || message.progress !== true || progressEnded || closing || controller.signal.aborted || progressCount >= MAX_PROGRESS_EVENTS) return;
       // Copy only public status metadata. A future generator must not expose
       // reasoning, reference bodies, credentials, or raw errors through this path.
       let progress;
@@ -279,15 +303,17 @@ export function createNativeHost({
       progressCount++;
       send({ id: message.id, type: 'progress', progress });
     };
-    const cancelledMessage = listing ? 'モデル一覧の取得が中断またはタイムアウトしました。ログイン状態を確認して再取得してください。' : CANCELLED;
+    const cancelledMessage = preparing ? 'AIへの接続準備が中断またはタイムアウトしました。'
+      : listing ? 'モデル一覧の取得が中断またはタイムアウトしました。ログイン状態を確認して再取得してください。' : CANCELLED;
     let cancel;
     const cancelled = new Promise((_, reject) => {
       cancel = () => reject(new Error(cancelledMessage));
       controller.signal.addEventListener('abort', cancel, { once: true });
     });
-    const timer = setTimeout(() => controller.abort(new Error(cancelledMessage)), listing ? modelTimeoutMs : timeoutMs);
+    const timer = setTimeout(() => controller.abort(new Error(cancelledMessage)), preparing ? preparationTimeoutMs : listing ? modelTimeoutMs : timeoutMs);
     const operation = Promise.resolve().then(() => {
       if (controller.signal.aborted) throw new Error(cancelledMessage);
+      if (preparing) return prepareProvider({provider: message.provider, signal: controller.signal});
       if (listing) return listModels({ provider: message.provider, signal: controller.signal });
       if (generatingPrompt) {
         onProgress({stage: 'generating'});
@@ -313,6 +339,7 @@ export function createNativeHost({
     }
     void Promise.race([operation, cancelled]).then(text => {
       progressEnded = true;
+      if (preparing) {send({id: message.id, ok: true, prepared: true}); return;}
       if (listing) { send({ id: message.id, ok: true, models: modelCatalog(text) }); return; }
       const agentResult = message.mode === 'agent' ? text : null;
       if (agentResult) text = agentResult.text;

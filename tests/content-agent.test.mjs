@@ -8,7 +8,7 @@ const flush = async () => {for (let i = 0; i < 40; i++) await Promise.resolve();
 
 function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'textarea', onPaste, onSelectionChange, holdTimers = false,
   clipboardSupport = true, clipboardConstructionThrows = false, execResult = false, execTransform = value => value,
-  getSettings = () => ({ok: true, provider: 'copilot'})} = {}) {
+  getSettings = () => ({ok: true, provider: 'copilot'}), prepareReply = () => ({ok: true})} = {}) {
   let root = null;
   let mutationCallback;
   let progressListener;
@@ -108,7 +108,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
       const button = new Element('button');
       const toggle = new Element('button');
       this.controls = {
-        '.bcr-provider': new Element('span'), '.bcr-status': new Element('span'), '.bcr-mode-note': new Element('p'),
+        '.bcr-provider': new Element('span'), '.bcr-status': new Element('span'), '.bcr-status-elapsed': new Element('span'), '.bcr-mode-note': new Element('p'), '.bcr-mode-control': new Element('div'),
         '.bcr-instruction': instruction, textarea: instruction, '.bcr-references': references, '.bcr-mode': mode,
         '.bcr-include-project': new Element('input'), '.bcr-agent-options': new Element('div'),
         '.bcr-interactive': new Element('input'), '.bcr-dialogue': new Element('div'), '.bcr-instruction-label': new Element('label'),
@@ -117,7 +117,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
         '.bcr-draft-log': new Element('div'), '.bcr-draft-instruction': new Textarea(), '.bcr-candidate': new Textarea(), '.bcr-create-draft': new Element('button'), '.bcr-insert-draft': new Element('button'), '.bcr-clear-dialogue': new Element('button'),
         '.bcr-sources': new Element('details'), '.bcr-generate': button, button: toggle,
         '.bcr-progress': new Element('section'), '.bcr-progress-list': new Element('ol'), '.bcr-elapsed': new Element('span'),
-        '.bcr-toggle': toggle, '.bcr-body': new Element('div'), '.bcr-heading': new Element('div'), '.bcr-compact-status': new Element('span')
+        '.bcr-toggle': toggle, '.bcr-input-only-toggle': new Element('button'), '.bcr-body': new Element('div'), '.bcr-heading': new Element('div'), '.bcr-compact-status': new Element('span')
       };
     }
     set innerHTML(value) {this.staticMarkup = value;}
@@ -173,6 +173,7 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
     chrome: {runtime: {id: 'test-extension', onMessage: {addListener(callback) {progressListener = callback;}, removeListener(callback) {if (progressListener === callback) progressListener = null;}}, sendMessage: async message => {
       messages.push(message);
       if (message.type === 'GET_SETTINGS') return getSettings();
+      if (message.type === 'PREPARE_REPLY') return prepareReply(message);
       if (message.type !== 'GENERATE_REPLY') throw new Error('Unexpected message');
       return new Promise(resolve => generations.push({message, resolve}));
     }}}
@@ -228,6 +229,114 @@ function harness({confirmOverwrite = false, confirmDelayMs = 0, editorType = 'te
     navigate(path) {location.pathname = path; mutationCallback();}
   };
 }
+
+test('connection preparation starts only on composition and coalesces focus and typing', async () => {
+  let release;
+  const preparation = new Promise(resolve => {release = resolve;});
+  const app = harness({prepareReply: () => preparation});
+  const preparations = () => app.messages.filter(message => message.type === 'PREPARE_REPLY');
+  await flush();
+  assert.equal(preparations().length, 0, 'mounting never starts a connection');
+  app.type('.bcr-references', 'OTHER-1');
+  assert.equal(preparations().length, 0);
+  app.control('.bcr-instruction').trigger('focus');
+  app.control('.bcr-draft-instruction').trigger('focus');
+  app.type('.bcr-instruction', '未送信の本文');
+  app.type('.bcr-draft-instruction', '未送信の追加指示');
+  assert.equal(preparations().length, 1);
+  assert.deepEqual({...preparations()[0]}, {type: 'PREPARE_REPLY', issueKey: 'TEST-12'});
+  assert.equal(app.messages.filter(message => message.type === 'GET_SETTINGS').length, 1);
+  app.advance(31000);
+  app.control('.bcr-instruction').trigger('focus');
+  assert.equal(preparations().length, 1, 'an in-flight request is never duplicated');
+  release({ok: true}); await flush();
+  app.type('.bcr-instruction', '入力を続ける'); await flush();
+  assert.equal(preparations().length, 2);
+  app.advance(29999);
+  app.control('.bcr-draft-instruction').trigger('focus');
+  assert.equal(preparations().length, 2);
+  app.advance(1);
+  app.control('.bcr-draft-instruction').trigger('focus'); await flush();
+  assert.equal(preparations().length, 3);
+  assert.equal(app.generations.length, 0);
+  assert.equal(app.control('.bcr-instruction').value, '入力を続ける');
+  assert.equal(app.control('.bcr-draft-instruction').value, '未送信の追加指示');
+});
+
+test('connection preparation is scoped to the current issue even while another issue is pending', async () => {
+  const app = harness({prepareReply: () => new Promise(() => {})});
+  await flush();
+  app.control('.bcr-instruction').trigger('focus');
+  app.navigate('/view/TEST-13'); await flush();
+  app.control('.bcr-draft-instruction').trigger('focus');
+  app.navigate('/view/TEST-12'); await flush();
+  app.control('.bcr-instruction').trigger('focus');
+  assert.deepEqual(app.messages.filter(message => message.type === 'PREPARE_REPLY').map(message => message.issueKey), ['TEST-12', 'TEST-13']);
+  assert.equal(app.generations.length, 0);
+});
+
+test('speculative connection failure preserves status and cannot block manual generation', async () => {
+  const app = harness({prepareReply: () => {throw new Error('接続できません');}});
+  await flush();
+  await app.submit();
+  const status = app.control('.bcr-status').textContent;
+  app.control('.bcr-instruction').trigger('focus'); await flush();
+  assert.equal(app.control('.bcr-status').textContent, status);
+  assert.equal(app.control('.bcr-generate').disabled, false);
+  app.type('.bcr-instruction', '修正したことを伝える');
+  assert.equal(app.messages.filter(message => message.type === 'PREPARE_REPLY').length, 1);
+  app.advance(30000);
+  app.control('.bcr-instruction').trigger('focus'); await flush();
+  assert.equal(app.messages.filter(message => message.type === 'PREPARE_REPLY').length, 2);
+  const pending = app.submit(); await flush();
+  assert.equal(app.generations.length, 1);
+  app.advance(30000);
+  app.control('.bcr-instruction').trigger('focus');
+  assert.equal(app.messages.filter(message => message.type === 'PREPARE_REPLY').length, 2, 'generation never triggers speculative work');
+  app.finish(); await pending;
+  assert.equal(app.control('.bcr-generate').disabled, false);
+});
+
+test('a completed generation allows immediate preparation for the next turn', async () => {
+  const preparations = [];
+  const app = harness({prepareReply: () => new Promise(resolve => {preparations.push(resolve);})});
+  await flush();
+  app.type('.bcr-mode', 'agent');
+  app.interactive(true);
+  app.type('.bcr-instruction', '状況を教えてください');
+  assert.equal(preparations.length, 1);
+  const pending = app.submit(); await flush();
+  app.control('.bcr-instruction').trigger('focus');
+  assert.equal(preparations.length, 1, 'active generation never starts another preparation');
+  app.finish({text: '状況を確認しました。'}); await pending;
+  app.type('.bcr-instruction', '次の確認事項を教えてください');
+  assert.equal(preparations.length, 2, 'a new turn need not wait for the previous cooldown');
+  preparations[0]({ok: true}); await flush();
+  app.advance(30000);
+  app.control('.bcr-instruction').trigger('focus');
+  assert.equal(preparations.length, 2, 'a late previous response cannot clear the current in-flight guard');
+  preparations[1]({ok: true}); await flush();
+  assert.equal(app.generations.length, 1);
+});
+
+test('hidden pages and disposed content scripts never prepare connections', async () => {
+  const app = harness();
+  await flush();
+  app.visibility('hidden');
+  app.control('.bcr-instruction').trigger('focus');
+  app.type('.bcr-draft-instruction', '保存する入力');
+  assert.equal(app.messages.filter(message => message.type === 'PREPARE_REPLY').length, 0);
+  app.visibility('visible'); await flush();
+  assert.equal(app.messages.filter(message => message.type === 'PREPARE_REPLY').length, 0);
+  const oldInput = app.control('.bcr-instruction');
+  app.reinject(); await flush();
+  oldInput.trigger('focus');
+  assert.equal(app.messages.filter(message => message.type === 'PREPARE_REPLY').length, 0);
+  const input = app.control('.bcr-instruction');
+  app.navigate('/projects/TEST');
+  input.trigger('focus');
+  assert.equal(app.messages.filter(message => message.type === 'PREPARE_REPLY').length, 0);
+});
 
 test('the AI panel collapses only after a submitted comment editor clears', async () => {
   const app = harness();
@@ -385,9 +494,15 @@ test('normal mode is the default and instruction is separate from references in 
   await flush();
   assert.equal(app.control('.bcr-body').hidden, true);
   assert.equal(app.control('.bcr-toggle').getAttribute('aria-expanded'), 'false');
+  assert.equal(app.control('.bcr-mode-control').hidden, true);
+  assert.equal(app.control('.bcr-status-elapsed').hidden, true);
   app.toggle();
   assert.equal(app.control('.bcr-body').hidden, false);
   assert.equal(app.control('.bcr-toggle').getAttribute('aria-expanded'), 'true');
+  assert.equal(app.root().classList.contains('bcr-input-only'), true, 'details start hidden when the panel is opened');
+  assert.equal(app.control('.bcr-input-only-toggle').getAttribute('aria-expanded'), 'false');
+  assert.equal(app.control('.bcr-input-only-toggle').textContent, '詳細を表示');
+  assert.equal(app.control('.bcr-mode-control').hidden, false);
   assert.equal(app.generations.length, 0, 'opening the panel never starts AI generation');
   assert.equal(app.control('.bcr-mode').value, 'chat');
   assert.equal(app.control('.bcr-agent-options').hidden, true);
@@ -512,6 +627,7 @@ test('recovery injection keeps unfinished fields, replaces listeners and never c
   app.type('.bcr-mode', 'agent');
   app.includeProject(false);
   app.editor.value = '投稿前の下書き';
+  app.control('.bcr-input-only-toggle').trigger('click');
   const previousRoot = app.root();
   app.reinject();
   await flush();
@@ -522,6 +638,11 @@ test('recovery injection keeps unfinished fields, replaces listeners and never c
   assert.equal(app.control('.bcr-include-project').checked, false);
   assert.equal(app.control('.bcr-body').hidden, false);
   assert.equal(app.editor.value, '投稿前の下書き');
+  assert.equal(app.root().classList.contains('bcr-input-only'), false, 'recovery retains deliberately opened details');
+  assert.equal(app.control('.bcr-input-only-toggle').getAttribute('aria-expanded'), 'true');
+  app.control('.bcr-input-only-toggle').trigger('click');
+  assert.equal(app.root().classList.contains('bcr-input-only'), true);
+  assert.equal(app.control('.bcr-input-only-toggle').getAttribute('aria-expanded'), 'false');
   assert.equal(app.intervals.size, 2);
   assert.equal(app.layoutActions.destroyed, 1);
   assert.equal(app.generations.length, 0);
@@ -807,7 +928,7 @@ test('confirmed textarea overwrite replaces its complete existing value and reta
   assert.match(app.control('.bcr-status').textContent, /挿入しました/);
 });
 
-test('mode, instruction and references have visible labels and associated help text', async () => {
+test('mode, instruction and references have accessible labels and associated help text', async () => {
   const app = harness();
   await flush();
   const markup = app.root().staticMarkup;
@@ -821,6 +942,8 @@ test('mode, instruction and references have visible labels and associated help t
     assert.ok(markup.includes(`id="${id}"`));
   }
   assert.ok(markup.includes('role="status" aria-live="polite"'));
+  assert.ok(markup.indexOf('id="bcr-mode"') < markup.indexOf('id="bcr-body"'), 'mode selection stays in the header outside collapsible details');
+  assert.match(markup, /class="bcr-status"[^>]*role="status"[^>]*><\/span>\s*<span[^>]*class="bcr-status-elapsed"[^>]*aria-live="off"/);
 });
 
 test('agent mode sends the selected scope and explains read-only investigation', async () => {
@@ -845,14 +968,22 @@ test('agent mode sends the selected scope and explains read-only investigation',
 test('agent project opt-out survives folding, mode changes and remounting and is sent as false', async () => {
   const app = harness();
   await flush();
+  app.toggle();
+  assert.equal(app.control('.bcr-mode-control').hidden, false);
   app.type('.bcr-mode', 'agent');
+  assert.equal(app.root().classList.contains('bcr-input-only'), true, 'changing mode keeps details hidden');
   app.includeProject(false);
   app.type('.bcr-instruction', 'この課題だけを確認して返信する');
   assert.match(app.control('.bcr-mode-note').textContent, /現在の課題と明示的に指定した参照先だけ/);
   app.toggle(); app.toggle();
   app.type('.bcr-mode', 'chat');
   assert.equal(app.control('.bcr-agent-options').hidden, true);
+  assert.equal(app.control('.bcr-mode-control').hidden, false);
+  app.control('.bcr-input-only-toggle').trigger('click');
+  assert.equal(app.root().classList.contains('bcr-input-only'), false);
   app.type('.bcr-mode', 'agent');
+  assert.equal(app.control('.bcr-mode-control').hidden, false, 'mode selection also stays available with details open');
+  assert.equal(app.control('.bcr-instruction').value, 'この課題だけを確認して返信する');
   app.root().remove(); app.mutate(); await flush();
   assert.equal(app.control('.bcr-include-project').checked, false);
   const pending = app.submit();
@@ -867,7 +998,12 @@ test('agent project opt-out survives folding, mode changes and remounting and is
 test('generation locks inputs but keeps folding available, including after a panel remount', async () => {
   const app = harness();
   await flush();
+  assert.equal(app.control('.bcr-input-only-toggle').hidden, true);
   app.toggle();
+  assert.equal(app.control('.bcr-input-only-toggle').hidden, false);
+  assert.equal(app.control('.bcr-mode-control').hidden, false);
+  app.control('.bcr-input-only-toggle').trigger('click');
+  assert.equal(app.root().classList.contains('bcr-input-only'), false);
   app.type('.bcr-instruction', '修正完了を伝える');
   app.type('.bcr-mode', 'agent');
   app.type('.bcr-references', 'PROJECT-123');
@@ -875,6 +1011,10 @@ test('generation locks inputs but keeps folding available, including after a pan
   await flush();
   assert.ok(app.root().querySelectorAll('.bcr-generate, textarea, select, input').every(control => control.disabled));
   assert.equal(app.control('.bcr-toggle').disabled, false);
+  assert.equal(app.control('.bcr-input-only-toggle').disabled, false);
+  app.control('.bcr-input-only-toggle').trigger('click');
+  assert.equal(app.root().classList.contains('bcr-input-only'), true);
+  assert.equal(app.control('.bcr-body').hidden, false);
   app.toggle();
   assert.equal(app.control('.bcr-body').hidden, true);
   assert.match(app.control('.bcr-toggle').textContent, /生成中/);
@@ -884,6 +1024,9 @@ test('generation locks inputs but keeps folding available, including after a pan
   assert.equal(app.control('.bcr-mode').value, 'agent');
   assert.equal(app.control('.bcr-references').value, 'PROJECT-123');
   assert.equal(app.control('.bcr-body').hidden, true);
+  assert.equal(app.root().classList.contains('bcr-input-only'), true);
+  assert.equal(app.control('.bcr-input-only-toggle').hidden, true);
+  assert.equal(app.control('.bcr-mode-control').hidden, true);
   assert.equal(app.control('.bcr-toggle').disabled, false);
   assert.ok(app.root().querySelectorAll('.bcr-generate, textarea, select, input').every(control => control.disabled));
   app.finish(); await pending;
@@ -891,6 +1034,11 @@ test('generation locks inputs but keeps folding available, including after a pan
   app.toggle();
   assert.equal(app.control('.bcr-body').hidden, false);
   assert.equal(app.control('.bcr-instruction').value, '修正完了を伝える');
+  assert.equal(app.control('.bcr-input-only-toggle').textContent, '詳細を表示');
+  app.control('.bcr-input-only-toggle').trigger('click');
+  assert.equal(app.root().classList.contains('bcr-input-only'), false);
+  assert.equal(app.control('.bcr-input-only-toggle').textContent, '詳細を非表示');
+  assert.equal(app.control('.bcr-references').value, 'PROJECT-123');
   assert.ok(app.root().querySelectorAll('.bcr-generate, textarea, select, input').every(control => !control.disabled));
 });
 
@@ -969,8 +1117,13 @@ test('source links are same-origin HTTPS only, deduplicated and rendered without
 
 test('live progress is correlated, rendered as text and kept independently from elapsed time', async () => {
   const app = harness(); await flush();
+  app.toggle();
+  assert.equal(app.control('.bcr-status-elapsed').hidden, true);
   app.type('.bcr-instruction', '調査して返信する');
   const pending = app.submit(); await flush();
+  assert.equal(app.root().classList.contains('bcr-input-only'), true);
+  assert.equal(app.control('.bcr-status-elapsed').hidden, false);
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '経過 0.0 秒');
   const before = app.control('.bcr-status').textContent;
   app.progress({requestId: 'another-request'});
   app.progress({issueKey: 'OTHER-1'});
@@ -984,19 +1137,29 @@ test('live progress is correlated, rendered as text and kept independently from 
   assert.equal(descendants(log, 'img').length, 0);
   assert.match(log.children.at(-1).textContent, /<img/);
   const entries = log.children.length;
-  app.advance(12000);
+  app.advance(100);
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '経過 0.1 秒');
+  assert.equal(app.control('.bcr-status').textContent, '<img src=x onerror=alert(1)>', 'timer ticks do not rewrite the live status message');
+  app.control('.bcr-input-only-toggle').trigger('click');
+  assert.equal(app.control('.bcr-status-elapsed').hidden, false, 'elapsed time remains available when details are opened');
+  app.advance(11900);
   assert.equal(app.control('.bcr-elapsed').textContent, '経過 12.0 秒');
+  assert.equal(app.control('.bcr-status-elapsed').textContent, app.control('.bcr-elapsed').textContent);
   assert.match(log.children.at(-1).textContent, /^\+0\.0秒（継続 12\.0秒）：<img/);
   assert.equal(log.children.length, entries, 'timer updates do not invent progress events');
   app.root().remove(); app.mutate(); await flush();
   assert.equal(app.control('.bcr-progress-list').children.length, entries);
+  assert.equal(app.control('.bcr-status-elapsed').hidden, false);
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '経過 12.0 秒');
   app.finish(); await pending;
   assert.equal(app.control('.bcr-elapsed').textContent, '所要 12.0 秒');
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '所要 12.0 秒');
   const completed = app.control('.bcr-status').textContent;
   app.progress({sequence: 3, message: '遅れて届いた通知'});
   app.advance(10000);
   assert.equal(app.control('.bcr-status').textContent, completed);
   assert.equal(app.control('.bcr-elapsed').textContent, '所要 12.0 秒');
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '所要 12.0 秒');
 });
 
 test('subsecond stage offsets and live durations form one timeline ending at the total elapsed time', async () => {
@@ -1134,16 +1297,44 @@ test('progress arriving after navigation cannot be attributed to a different pag
   app.navigate('/view/OTHER-1');
   app.progress({sequence: 1, message: '誤表示してはいけない'});
   assert.equal(app.control('.bcr-progress-list').children.length, 0);
+  assert.equal(app.control('.bcr-status-elapsed').hidden, true, 'another issue does not inherit the running timer');
   app.advance(2500);
   assert.equal(app.control('.bcr-elapsed').textContent, '所要 0.0 秒');
+  assert.equal(app.control('.bcr-status-elapsed').hidden, true);
   app.navigate('/view/TEST-12');
   assert.equal(app.control('.bcr-elapsed').textContent, '経過 3.0 秒');
+  assert.equal(app.control('.bcr-status-elapsed').hidden, false);
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '経過 3.0 秒');
   const before = app.control('.bcr-progress-list').children.length;
   app.progress({sequence: 2, message: '誤表示してはいけない'});
   assert.equal(app.control('.bcr-progress-list').children.length, before);
   app.finish(); await pending;
   assert.equal(app.control('.bcr-elapsed').textContent, '所要 3.0 秒');
   assert.equal(timeline(app).at(-1).start, 3);
+});
+
+test('another active issue suppresses a previous result duration beside the current status', async () => {
+  const app = harness(); await flush();
+  app.toggle();
+  app.type('.bcr-instruction', '最初の返信');
+  const first = app.submit(); await flush();
+  app.advance(800);
+  app.finish(); await first;
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '所要 0.8 秒');
+  app.navigate('/view/OTHER-1');
+  assert.equal(app.control('.bcr-status-elapsed').hidden, true);
+  app.type('.bcr-instruction', '次の返信');
+  const second = app.submit(); await flush();
+  app.advance(100);
+  app.navigate('/view/TEST-12');
+  assert.match(app.control('.bcr-status').textContent, /別の課題で生成処理中/);
+  assert.equal(app.control('.bcr-status-elapsed').hidden, true, 'old elapsed time must not look like the other issue current duration');
+  app.advance(1000);
+  assert.equal(app.control('.bcr-status-elapsed').hidden, true);
+  app.navigate('/view/OTHER-1');
+  assert.equal(app.control('.bcr-status-elapsed').hidden, false);
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '経過 1.1 秒');
+  app.finish({}, 1); await second;
 });
 
 test('cancelled overwrite preserves the existing draft and accounts for confirmation separately from generation', async () => {
@@ -1167,9 +1358,11 @@ test('cancelled overwrite preserves the existing draft and accounts for confirma
   assert.equal(entries.at(-1).start, 4);
   assert.equal(entries.at(-1).duration, undefined);
   assert.equal(app.control('.bcr-elapsed').textContent, '所要 4.0 秒');
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '所要 4.0 秒');
   const completed = logs(app);
   app.advance(5000);
   assert.deepEqual(logs(app), completed);
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '所要 4.0 秒');
 });
 
 test('navigating away and back during generation prevents insertion and source attribution to a new screen', async () => {
@@ -1206,6 +1399,10 @@ test('failed generation preserves inputs and enables controls for correction', a
   assert.ok(app.root().querySelectorAll('.bcr-generate, textarea, select, input').every(control => !control.disabled));
   assert.equal(app.editorEvents.length, 0);
   assert.equal(app.control('.bcr-elapsed').textContent, '所要 2.3 秒');
+  assert.equal(app.control('.bcr-status-elapsed').hidden, false);
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '所要 2.3 秒');
+  app.advance(10000);
+  assert.equal(app.control('.bcr-status-elapsed').textContent, '所要 2.3 秒', 'failed generation has a fixed duration');
   assert.equal(timeline(app).at(-1).start, 2.3);
   assert.equal(timeline(app).at(-1).duration, undefined);
   const failed = logs(app);
@@ -1218,7 +1415,7 @@ test('interactive chat places composer after history, collapses settings, and re
   app.type('.bcr-mode', 'agent'); app.interactive(true);
   const markup = app.root().staticMarkup;
   assert.ok(markup.indexOf('bcr-dialogue-list') < markup.indexOf('bcr-composer'));
-  assert.ok(markup.indexOf('bcr-composer') < markup.indexOf('bcr-dialogue-controls'));
+  assert.ok(markup.indexOf('class="bcr-composer"') < markup.indexOf('class="bcr-dialogue-controls '));
   assert.equal(app.control('.bcr-reference-settings').open, false);
   assert.equal(app.control('.bcr-dialogue-controls').hidden, false);
   app.type('.bcr-instruction', '**ユーザーは原文表示**');

@@ -2,7 +2,7 @@
   const element = id => document.getElementById(id);
   const fields = {
     displayName: element('promptDisplayName'), profileUrl: element('promptProfileUrl'),
-    generatedPrompt: element('promptGenerated'), fixedPrompt: element('promptFixed'), locked: element('promptLocked')
+    generatedPrompt: element('promptGenerated'), fixedPrompt: element('promptFixed'), knowledge: element('promptKnowledge'), locked: element('promptLocked')
   };
   const fieldSaveButtons = Object.fromEntries(Object.keys(fields).map(key => [key, element(`${fields[key].id}Save`)]));
   const fieldSaveStatus = Object.fromEntries(Object.keys(fields).map(key => [key, element(`${fields[key].id}SaveStatus`)]));
@@ -12,6 +12,7 @@
   let savedProfile = null;
   let defaultGeneratedPrompt = null;
   let defaultFixedPrompt = null;
+  let defaultKnowledge = null;
   let editVersion = 0;
   let readVersion = 0;
   let actionVersion = 0;
@@ -42,6 +43,7 @@
     }
     element('promptResetGenerated').disabled = !loaded || saving || defaultGeneratedPrompt === null;
     element('promptResetFixed').disabled = !loaded || saving || defaultFixedPrompt === null;
+    element('promptResetKnowledge').disabled = !loaded || saving || defaultKnowledge === null;
     element('promptReload').disabled = saving;
     element('promptRegenerate').disabled = !loaded || saving || regenerating || fields.locked.checked || savedProfile?.status?.state === 'running';
     const dirty = element('promptDirty');
@@ -90,6 +92,8 @@
       && result.defaultGeneratedPrompt.length <= 12000 && !result.defaultGeneratedPrompt.includes('\u0000') ? result.defaultGeneratedPrompt : null;
     defaultFixedPrompt = typeof result.defaultFixedPrompt === 'string'
       && result.defaultFixedPrompt.length <= 10000 && !result.defaultFixedPrompt.includes('\u0000') ? result.defaultFixedPrompt : null;
+    defaultKnowledge = typeof result.defaultKnowledge === 'string'
+      && result.defaultKnowledge.length <= 30000 && !result.defaultKnowledge.includes('\u0000') ? result.defaultKnowledge : null;
     const profile = savedProfile;
     const stateLabels = {idle: '未生成', running: '生成中', success: '生成完了', error: '生成できませんでした', skipped: '生成をスキップ'};
     const state = profile.status?.state;
@@ -98,6 +102,7 @@
     status.className = state === 'error' ? 'error' : state === 'success' ? 'success' : 'note';
     element('promptMeta').textContent = `最終生成：${dateLabel(profile.generatedAt, '未生成')} ／ 最終確認：${dateLabel(profile.checkedAt, '未確認')} ／ 保存版：${profile.revision}`;
     element('promptEffective').value = typeof result.effectivePrompt === 'string' ? result.effectivePrompt : '';
+    element('promptKnowledgeSaved').value = typeof profile.knowledge === 'string' ? profile.knowledge : '';
     renderSources(profile.sources);
   }
   function validateResult(result) {
@@ -145,6 +150,7 @@
     if (profile.displayName.length > 100) throw new Error('表示名は100文字以内で入力してください。');
     if (profile.generatedPrompt.length > 12000) throw new Error('生成プロンプトは12,000文字以内で入力してください。');
     if (profile.fixedPrompt.length > 10000) throw new Error('常に追加する指示は10,000文字以内で入力してください。');
+    if (profile.knowledge.length > 30000 || profile.knowledge.includes('\u0000')) throw new Error('知識は30,000文字以内で入力してください（NULL文字は使用できません）。');
     if (profile.profileUrl) {
       let valid = false;
       try {
@@ -219,6 +225,15 @@
     editVersion++;
     renderControls();
     feedback('「常に追加する指示」を初期値に戻しました（標準は空欄です）。「プロンプト設定を保存」で適用してください。', false, version);
+  });
+  element('promptResetKnowledge').addEventListener('click', () => {
+    if (element('promptResetKnowledge').disabled) return;
+    const version = ++actionVersion;
+    fields.knowledge.value = defaultKnowledge;
+    fieldSaveStatus.knowledge.textContent = '';
+    editVersion++;
+    renderControls();
+    feedback('「知識」を標準の日本語ビジネス文面テンプレートに戻しました。「知識」の保存ボタンまたは「プロンプト設定を保存」で適用してください。', false, version);
   });
   element('promptForm').addEventListener('submit', async event => {
     event.preventDefault();

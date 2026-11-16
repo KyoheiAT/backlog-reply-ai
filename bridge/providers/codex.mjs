@@ -3,6 +3,7 @@ import { access, mkdtemp, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createPreparation } from '../preparation.mjs';
 
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -211,8 +212,32 @@ function runProcess({ invocation, args, input = '', cwd, env, signal, timeoutMs,
 export function createCodexGenerator({
   spawnImpl = spawn, env = process.env, platform = process.platform,
   resolveCommand = resolveCodexCommand, timeoutMs = DEFAULT_TIMEOUT_MS,
+  preparationTtlMs = 60_000,
 } = {}) {
-  return async function generate({ prompt, model, signal, purpose = 'reply' }) {
+  const tempRoot = path.resolve(tmpdir());
+  async function disposeRuntime({cwd}) {
+    if (path.dirname(path.resolve(cwd)) === tempRoot && path.basename(cwd).startsWith('backlog-codex-')) {
+      await rm(cwd, {recursive: true, force: true});
+    }
+  }
+  async function createRuntime(signal) {
+    if (signal?.aborted) throw abortError();
+    const invocation = await resolveCommand({env, platform});
+    if (signal?.aborted) throw abortError();
+    const childEnv = codexEnvironment(env);
+    const cwd = await mkdtemp(path.join(tempRoot, 'backlog-codex-'));
+    try {
+      // No generation, session, or prompt is sent by preparation.
+      const status = await runProcess({invocation, args: ['--no-daemon', 'login', 'status'],
+        cwd, env: childEnv, signal, timeoutMs: Math.min(timeoutMs, 15_000), spawnImpl, platform});
+      if (!/logged in using chatgpt/i.test(`${status.stdout}\n${status.stderr}`)) {
+        throw new Error('この拡張機能はChatGPTログインのみ対応しています。codex loginで「Sign in with ChatGPT」を選択してください。');
+      }
+      return {invocation, cwd, childEnv};
+    } catch (error) {await disposeRuntime({cwd}); throw error;}
+  }
+  const preparation = createPreparation({create: createRuntime, dispose: disposeRuntime, ttlMs: preparationTtlMs});
+  const generate = async function ({ prompt, model, signal, purpose = 'reply' }) {
     if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('生成する内容が空です。');
     if (!['reply', 'plan', 'prompt'].includes(purpose)) throw new Error('Codexの生成用途が不正です。');
     if (typeof model === 'string') model = model.trim() || undefined;
@@ -220,18 +245,8 @@ export function createCodexGenerator({
       throw new Error('CodexのモデルIDが不正です。');
     }
     if (signal?.aborted) throw abortError();
-    const invocation = await resolveCommand({ env, platform });
-    const childEnv = codexEnvironment(env);
-    const tempRoot = path.resolve(tmpdir());
-    const cwd = await mkdtemp(path.join(tempRoot, 'backlog-codex-'));
+    const {invocation, cwd, childEnv} = await preparation.take({signal});
     try {
-      // Check before forced_login_method so a cached API login is rejected,
-      // rather than letting Codex alter/logout that existing login.
-      const status = await runProcess({ invocation, args: ['--no-daemon', 'login', 'status'],
-        cwd, env: childEnv, signal, timeoutMs: Math.min(timeoutMs, 15_000), spawnImpl, platform });
-      if (!/logged in using chatgpt/i.test(`${status.stdout}\n${status.stderr}`)) {
-        throw new Error('この拡張機能はChatGPTログインのみ対応しています。codex loginで「Sign in with ChatGPT」を選択してください。');
-      }
       let answer = '';
       let completed = false;
       let turnFailed;
@@ -257,12 +272,12 @@ export function createCodexGenerator({
       if (purpose === 'prompt' && answer.length > 12_000) throw new Error('生成されたプロンプトが12,000文字を超えました。条件を短くして再実行してください。');
       return answer;
     } finally {
-      // cwd was created here; refuse recursive cleanup if this invariant changes.
-      if (path.dirname(path.resolve(cwd)) === tempRoot && path.basename(cwd).startsWith('backlog-codex-')) {
-        await rm(cwd, { recursive: true, force: true });
-      }
+      await disposeRuntime({cwd});
     }
   };
+  generate.prepare = preparation.prepare;
+  generate.disposePrepared = preparation.clear;
+  return generate;
 }
 
 export const generateCodex = createCodexGenerator();

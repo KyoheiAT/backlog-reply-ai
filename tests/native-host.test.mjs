@@ -92,6 +92,37 @@ test('model catalog requests use only the selected lister and return safe bounde
   }
 });
 
+test('preparation uses only provider and cancellation, never invokes generation, and disposes on close', async t => {
+  const calls = [];
+  let disposed = 0;
+  const host = setup(t, {generate: async () => {throw new Error('must not generate');},
+    prepareProvider: async input => {calls.push(input);}, disposePrepared: async () => {disposed++;}});
+  host.send({id: 'prepare-copilot', type: 'prepare', provider: 'copilot'});
+  host.send({id: 'prepare-codex', type: 'prepare', provider: 'codex'});
+  const replies = await host.waitFor(2);
+  assert.deepEqual(calls.map(call => call.provider), ['copilot', 'codex']);
+  assert.ok(calls.every(call => Object.keys(call).sort().join(',') === 'provider,signal'));
+  assert.ok(replies.every(reply => reply.ok && reply.prepared === true && reply.text === undefined));
+  await host.close();
+  assert.equal(disposed, 1);
+});
+
+test('preparation rejects prompt data and has its own bounded cancellation deadline', async t => {
+  let signal;
+  const host = setup(t, {preparationTimeoutMs: 20, prepareProvider: input => {
+    signal = input.signal;
+    return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), {once: true}));
+  }, disposePrepared: async () => {}});
+  host.send({id: 'with-prompt', type: 'prepare', provider: 'copilot', prompt: 'never send'});
+  assert.equal((await host.waitFor(1))[0].ok, false);
+  assert.equal(signal, undefined);
+  host.send({id: 'timeout', type: 'prepare', provider: 'copilot'});
+  const replies = await host.waitFor(2);
+  assert.equal(replies[1].ok, false);
+  assert.match(replies[1].error, /接続準備.*タイムアウト/);
+  assert.equal(signal.aborted, true);
+});
+
 test('model listing timeout aborts the lister and never invokes generation', async t => {
   let signal;
   const host = setup(t, {modelTimeoutMs: 10, listModels: input => {

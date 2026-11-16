@@ -6,10 +6,11 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../prompt-options.js', import.meta.url), 'utf8');
 const markup = await readFile(new URL('../options.html', import.meta.url), 'utf8');
 const flush = async () => {for (let i = 0; i < 40; i++) await Promise.resolve();};
-const profile = (values = {}) => ({displayName: '', profileUrl: '', generatedPrompt: '', fixedPrompt: '', locked: false,
+const profile = (values = {}) => ({displayName: '', profileUrl: '', generatedPrompt: '', fixedPrompt: '', knowledge: '', locked: false,
   revision: 0, generatedAt: '', checkedAt: '', sources: [], status: {state: 'idle', message: '', at: ''}, ...values});
 const defaultPrompt = '';
 const defaultGeneratedPrompt = '相手に配慮した丁寧な完成文だけを作成する。\n事実と推測を区別し、次の依頼を明確にする。';
+const defaultKnowledge = '文例・言い換え集\n恐れ入りますが、ご確認いただけますでしょうか。';
 
 function harness(initial = profile(), options = {}) {
   let stored = initial;
@@ -37,7 +38,8 @@ function harness(initial = profile(), options = {}) {
   };
   const result = value => ({ok: true, profile: value, effectivePrompt: `合成済み：${value.displayName}|${value.generatedPrompt}|${value.fixedPrompt}`,
     defaultGeneratedPrompt: Object.hasOwn(options, 'defaultGeneratedPrompt') ? options.defaultGeneratedPrompt : defaultGeneratedPrompt,
-    defaultFixedPrompt: Object.hasOwn(options, 'defaultFixedPrompt') ? options.defaultFixedPrompt : defaultPrompt});
+    defaultFixedPrompt: Object.hasOwn(options, 'defaultFixedPrompt') ? options.defaultFixedPrompt : defaultPrompt,
+    defaultKnowledge: Object.hasOwn(options, 'defaultKnowledge') ? options.defaultKnowledge : defaultKnowledge});
   vm.runInNewContext(source, {document, URL, confirm: message => {confirms.push(message); return confirmResult;}, chrome: {
     runtime: {sendMessage(message) {
       const request = {message: JSON.parse(JSON.stringify(message)), resolved: false};
@@ -55,6 +57,7 @@ function harness(initial = profile(), options = {}) {
     regenerate: () => document.getElementById('promptRegenerate').dispatch('click'),
     resetGenerated: () => document.getElementById('promptResetGenerated').dispatch('click'),
     resetFixed: () => document.getElementById('promptResetFixed').dispatch('click'),
+    resetKnowledge: () => document.getElementById('promptResetKnowledge').dispatch('click'),
     reload: () => document.getElementById('promptReload').dispatch('click'),
     confirm(value) {confirmResult = value;},
     defer(value = true) {deferReads = value;},
@@ -138,11 +141,95 @@ test('prompt editor is an independent form with explicit labels, limits and a re
   assert.match(markup, /id="promptEffective"[^>]*readonly/);
   assert.match(markup, /id="promptGenerated"[^>]*maxlength="12000"/);
   assert.match(markup, /id="promptFixed"[^>]*maxlength="10000"/);
+  assert.match(markup, /id="promptKnowledge"[^>]*maxlength="30000"/);
+  assert.match(markup, /id="promptKnowledgeSaved"[^>]*readonly/);
+  assert.match(markup, /<button\b[^>]*id="promptResetKnowledge"[^>]*type="button"[^>]*disabled>知識をデフォルトに戻す<\/button>/);
   assert.match(markup, /<button\b[^>]*id="promptResetGenerated"[^>]*type="button"[^>]*disabled>生成プロンプトをデフォルトに戻す<\/button>/);
   assert.match(markup, /<button\b[^>]*id="promptResetFixed"[^>]*type="button"[^>]*disabled>追加指示を空に戻す<\/button>/);
   assert.match(markup, /「生成プロンプトをデフォルトに戻す」はこの欄だけを標準の編集方針に戻します/);
   assert.match(markup, /基本の編集方針は生成プロンプトに含まれている/);
-  for (const id of ['promptDisplayName', 'promptProfileUrl', 'promptGenerated', 'promptFixed', 'promptLocked']) assert.ok(markup.includes(`for="${id}"`));
+  for (const id of ['promptDisplayName', 'promptProfileUrl', 'promptGenerated', 'promptFixed', 'promptKnowledge', 'promptKnowledgeSaved', 'promptLocked']) assert.ok(markup.includes(`for="${id}"`));
+});
+
+test('knowledge is displayed separately, reset only changes knowledge, and individual save preserves unsaved instructions', async () => {
+  const initial = profile({generatedPrompt: '保存済み指示', fixedPrompt: '保存済み補足', knowledge: '保存済み知識', locked: true, revision: 4});
+  const app = harness(initial);
+  assert.equal(app.element('promptResetKnowledge').disabled, true);
+  await flush();
+  assert.equal(app.element('promptKnowledge').value, '保存済み知識');
+  assert.equal(app.element('promptKnowledgeSaved').value, '保存済み知識');
+  assert.doesNotMatch(app.element('promptEffective').value, /保存済み知識/);
+  app.type('promptGenerated', '未保存の指示');
+  app.type('promptFixed', '未保存の補足');
+  app.resetKnowledge();
+  assert.equal(app.element('promptKnowledge').value, defaultKnowledge);
+  assert.equal(app.element('promptKnowledgeSaved').value, '保存済み知識');
+  assert.equal(app.element('promptGenerated').value, '未保存の指示');
+  assert.equal(app.element('promptFixed').value, '未保存の補足');
+  assert.equal(app.element('promptLocked').checked, true);
+  assert.equal(app.requests.length, 1, 'reset does not save until requested');
+  const pending = app.element('promptKnowledgeSave').dispatch('click');
+  const request = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(request.message.profile.knowledge, defaultKnowledge);
+  assert.equal(request.message.profile.generatedPrompt, initial.generatedPrompt);
+  assert.equal(request.message.profile.fixedPrompt, initial.fixedPrompt);
+  app.resolve(request, profile({...request.message.profile, revision: 5})); await pending;
+  assert.equal(app.element('promptKnowledgeSaved').value, defaultKnowledge);
+  assert.equal(app.element('promptKnowledgeSave').hidden, true);
+  assert.equal(app.element('promptGenerated').value, '未保存の指示');
+  assert.equal(app.element('promptFixed').value, '未保存の補足');
+});
+
+test('cleared knowledge saves as an explicit empty string and in-flight knowledge edits are retained', async () => {
+  const app = harness(profile({knowledge: '以前の知識', revision: 2})); await flush();
+  app.type('promptKnowledge', '');
+  const pending = app.element('promptKnowledgeSave').dispatch('click');
+  const request = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(request.message.profile.knowledge, '');
+  assert.equal(app.element('promptResetKnowledge').disabled, true);
+  app.type('promptKnowledge', '保存中に追加した文例');
+  app.resetKnowledge();
+  assert.equal(app.element('promptKnowledge').value, '保存中に追加した文例');
+  app.resolve(request, profile({...request.message.profile, revision: 3})); await pending;
+  assert.equal(app.element('promptKnowledgeSaved').value, '');
+  assert.equal(app.element('promptKnowledge').value, '保存中に追加した文例');
+  assert.equal(app.element('promptKnowledgeSave').hidden, false);
+  assert.equal(app.element('promptResetKnowledge').disabled, false);
+});
+
+test('knowledge edits survive external updates while saved knowledge preview refreshes and stale saves fail', async () => {
+  const app = harness(profile({knowledge: '保存済み知識', revision: 2})); await flush();
+  app.type('promptKnowledge', '手元で編集中の知識');
+  app.change(profile({knowledge: '別画面で保存した知識', revision: 3})); await flush();
+  assert.equal(app.element('promptKnowledge').value, '手元で編集中の知識');
+  assert.equal(app.element('promptKnowledgeSaved').value, '別画面で保存した知識');
+  assert.match(app.element('promptDirty').textContent, /競合/);
+  const pending = app.save();
+  const request = app.next('SAVE_PROMPT_PROFILE');
+  assert.equal(request.message.profile.revision, 2);
+  app.fail(request, '設定が更新されました'); await pending;
+  assert.equal(app.element('promptKnowledge').value, '手元で編集中の知識');
+  assert.match(app.element('promptFeedback').textContent, /未保存/);
+});
+
+test('invalid or unavailable default knowledge disables reset without blocking editing', async () => {
+  for (const value of [undefined, null, 7, 'x'.repeat(30001), 'invalid\0reference']) {
+    const app = harness(profile({knowledge: '保持する知識'}), {defaultKnowledge: value}); await flush();
+    assert.equal(app.element('promptResetKnowledge').disabled, true);
+    app.resetKnowledge();
+    assert.equal(app.element('promptKnowledge').value, '保持する知識');
+    assert.equal(app.element('promptSave').disabled, false);
+  }
+});
+
+test('oversized or malformed knowledge is rejected without truncating the editable content', async () => {
+  const app = harness(); await flush();
+  for (const knowledge of ['x'.repeat(30001), 'invalid\0reference']) {
+    app.type('promptKnowledge', knowledge); await app.save();
+    assert.equal(app.element('promptKnowledge').value, knowledge);
+    assert.match(app.element('promptFeedback').textContent, /知識.*30,000/);
+  }
+  assert.equal(app.requests.filter(request => request.message.type === 'SAVE_PROMPT_PROFILE').length, 0);
 });
 
 test('reset clears only the fixed prompt and remains an unsaved edit until the user saves', async () => {
@@ -324,7 +411,7 @@ test('save sends only editable profile and revision, keeps generated text and fi
   const pending = app.save();
   const request = app.next('SAVE_PROMPT_PROFILE');
   assert.deepEqual(request.message, {type: 'SAVE_PROMPT_PROFILE', profile: {
-    displayName: '本人名', profileUrl: 'https://space.backlog.jp/user/*', generatedPrompt: '現在の文体', fixedPrompt: '毎回追加する指示', locked: false, revision: 7
+    displayName: '本人名', profileUrl: 'https://space.backlog.jp/user/*', generatedPrompt: '現在の文体', fixedPrompt: '毎回追加する指示', knowledge: '', locked: false, revision: 7
   }});
   app.resolve(request, profile({...request.message.profile, revision: 8})); await pending;
   assert.equal(app.element('promptDisplayName').value, '本人名');

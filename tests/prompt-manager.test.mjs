@@ -9,6 +9,7 @@ const defaultsContext = vm.createContext({});
 vm.runInContext(defaultsSource, defaultsContext);
 const defaultFixedPrompt = defaultsContext.BacklogPromptDefaults.fixedPrompt;
 const defaultGeneratedPrompt = defaultsContext.BacklogPromptDefaults.generatedPrompt;
+const defaultKnowledge = defaultsContext.BacklogPromptDefaults.knowledge;
 const supplementHeading = '\n\n【本人情報・Backlog公式ガイドの補足】\n';
 const combinedPrompt = supplement => defaultGeneratedPrompt + supplementHeading + supplement;
 const supplementBudget = Math.min(3000, 12000 - defaultGeneratedPrompt.length - supplementHeading.length);
@@ -72,7 +73,7 @@ function fixture({state, fetch: fetchOverride, generate: generateOverride, timer
 test('publishing and reading defaults has no storage, fetch, or generation side effects', async () => {
   const f = fixture();
   assert.deepEqual(clone(await f.manager.getState()), {
-    displayName: '', profileUrl: '', generatedPrompt: defaultGeneratedPrompt, fixedPrompt: defaultFixedPrompt, fixedPromptInitialized: true, locked: false, revision: 0,
+    displayName: '', profileUrl: '', generatedPrompt: defaultGeneratedPrompt, fixedPrompt: defaultFixedPrompt, fixedPromptInitialized: true, knowledge: defaultKnowledge, locked: false, revision: 0,
     generatedAt: '', checkedAt: '', sources: [], status: {state: 'idle', message: '', at: ''}
   });
   assert.equal(f.writes.length + f.fetches.length + f.generations.length, 0);
@@ -104,6 +105,38 @@ test('an intentionally empty main prompt survives save and restart without resto
   assert.equal(saved.generatedPrompt, '');
   assert.equal((await fixture({state: f.data.promptProfile}).manager.getState()).generatedPrompt, '');
   assert.equal(saved.fixedPrompt, initial.fixedPrompt);
+});
+
+test('new and legacy profiles receive default knowledge while retaining custom prompts and metadata', async () => {
+  assert.equal(typeof defaultKnowledge, 'string');
+  assert.ok(defaultKnowledge.trim().length > 0 && defaultKnowledge.length <= 30000);
+  for (const knowledge of [undefined, null, 7, 'x'.repeat(30001), 'invalid\0reference']) {
+    const stored = {...initial, knowledge};
+    if (knowledge === undefined) delete stored.knowledge;
+    const f = fixture({state: stored});
+    const state = await f.manager.getState();
+    assert.equal(state.knowledge, defaultKnowledge);
+    assert.equal(state.generatedPrompt, initial.generatedPrompt);
+    assert.equal(state.fixedPrompt, initial.fixedPrompt);
+    assert.equal(state.revision, initial.revision);
+    assert.equal(f.writes.length + f.fetches.length + f.generations.length, 0);
+  }
+});
+
+test('custom and explicitly empty knowledge survive saving, restart and regeneration separately from instructions', async () => {
+  for (const knowledge of ['独自の参考文例\n> 引用をそのまま保存', '']) {
+    const f = fixture({state: initial});
+    const saved = await f.manager.saveState({revision: initial.revision, knowledge});
+    assert.equal(saved.knowledge, knowledge);
+    assert.equal(saved.generatedPrompt, initial.generatedPrompt);
+    assert.equal(saved.fixedPrompt, initial.fixedPrompt);
+    const restarted = fixture({state: f.data.promptProfile});
+    assert.equal((await restarted.manager.getState()).knowledge, knowledge);
+    const generated = await restarted.manager.regenerate({trigger: 'startup'});
+    assert.equal(generated.knowledge, knowledge);
+    assert.ok(restarted.writes.every(value => value.knowledge === knowledge));
+    if (knowledge) assert.equal(restarted.generations[0].prompt.includes(knowledge), false, 'knowledge must not be merged into generated instructions');
+  }
 });
 
 test('new and legacy empty additional instructions remain empty without replacing other settings', async () => {
@@ -256,12 +289,14 @@ test('rejects non-profile URLs, credentials, query/hash, path traversal and non-
 test('validates editable lengths/types while allowing names to be cleared', async () => {
   const f = fixture();
   for (const invalid of [{displayName: 'a'.repeat(101)}, {displayName: null}, {generatedPrompt: 'a'.repeat(12001)},
-    {fixedPrompt: 'a'.repeat(10001)}, {generatedPrompt: '\0'}, {locked: 'true'}, {profileUrl: null}]) {
+    {fixedPrompt: 'a'.repeat(10001)}, {generatedPrompt: '\0'}, {knowledge: 'a'.repeat(30001)}, {knowledge: null},
+    {knowledge: '\0'}, {locked: 'true'}, {profileUrl: null}]) {
     await assert.rejects(f.manager.saveState({revision: 0, ...invalid}), {code: 'INVALID_PROFILE'});
   }
-  const state = await f.manager.saveState({revision: 0, displayName: '', profileUrl: '', generatedPrompt: 'x'.repeat(12000), fixedPrompt: 'x'.repeat(10000)});
+  const state = await f.manager.saveState({revision: 0, displayName: '', profileUrl: '', generatedPrompt: 'x'.repeat(12000), fixedPrompt: 'x'.repeat(10000), knowledge: 'x'.repeat(30000)});
   assert.equal(state.displayName, '');
   assert.equal(state.revision, 1);
+  assert.equal(state.knowledge.length, 30000);
 });
 
 test('stale and concurrent saves are rejected without overwriting current input', async () => {
@@ -333,7 +368,7 @@ test('coalesces concurrent regeneration, including calls from different triggers
   assert.equal(f.fetches.length, 5);
 });
 
-for (const edit of [{generatedPrompt: 'manual'}, {fixedPrompt: 'manual fixed'}, {displayName: 'different'}, {profileUrl: 'https://example.backlog.com/user/new'}, {locked: true}]) {
+for (const edit of [{generatedPrompt: 'manual'}, {fixedPrompt: 'manual fixed'}, {knowledge: 'manual knowledge'}, {displayName: 'different'}, {profileUrl: 'https://example.backlog.com/user/new'}, {locked: true}]) {
   test(`discards generated result after editing ${Object.keys(edit)[0]}`, async () => {
     const answer = deferred();
     const f = fixture({state: initial, generate: () => answer.promise});
@@ -345,6 +380,7 @@ for (const edit of [{generatedPrompt: 'manual'}, {fixedPrompt: 'manual fixed'}, 
     assert.equal(state.status.state, 'skipped');
     assert.equal(state.generatedPrompt, edit.generatedPrompt ?? initial.generatedPrompt);
     assert.equal(state.fixedPrompt, edit.fixedPrompt ?? initial.fixedPrompt);
+    assert.equal(state.knowledge, edit.knowledge ?? defaultKnowledge);
     assert.equal(state.revision, 5);
     assert.equal(state.generatedAt, initial.generatedAt);
   });

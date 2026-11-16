@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
+import { createPreparation } from '../preparation.mjs';
 
 const REQUEST_TIMEOUT_MS = 180_000;
 
@@ -44,8 +45,66 @@ function runtimeEnvironment() {
 export function createCopilotGenerator({
   loadSdk = () => import('@github/copilot-sdk'),
   cleanupTimeoutMs = 5_000,
+  preparationTtlMs = 60_000,
 } = {}) {
-  return async function generateCopilot({ prompt, model, signal, purpose = 'reply' }) {
+  const temporaryRoot = resolve(tmpdir());
+  async function disposeRuntime({client, workingDirectory}) {
+    if (client) {
+      const stopped = await cleanup(async () => {
+        const errors = await client.stop();
+        if (errors?.length) throw errors[0];
+      }, cleanupTimeoutMs);
+      if (!stopped) await cleanup(() => client.forceStop(), cleanupTimeoutMs);
+    }
+    const target = resolve(workingDirectory);
+    if (target.startsWith(temporaryRoot + sep) && target !== temporaryRoot) {
+      await cleanup(() => rm(target, {recursive: true, force: true}), cleanupTimeoutMs);
+    }
+  }
+  async function createRuntime(signal) {
+    if (signal?.aborted) throw abortError(signal);
+    let sdk;
+    try {sdk = await loadSdk();}
+    catch (error) {throw new Error('Copilot SDKを読み込めません。Node.js 22.12以上で npm install を実行してください。', {cause: error});}
+    if (signal?.aborted) throw abortError(signal);
+    const workingDirectory = await mkdtemp(join(temporaryRoot, 'backlog-ai-copilot-'));
+    let client;
+    let rejectCancellation;
+    const cancelled = new Promise((_, reject) => {rejectCancellation = reject;});
+    cancelled.catch(() => {});
+    const cancel = () => {
+      rejectCancellation(abortError(signal));
+      if (client) void client.forceStop().catch(() => {});
+    };
+    signal?.addEventListener('abort', cancel, {once: true});
+    try {
+      if (signal?.aborted) throw abortError(signal);
+      client = new sdk.CopilotClient({
+        useLoggedInUser: true, workingDirectory, logLevel: 'none',
+        env: runtimeEnvironment(), connection: sdk.RuntimeConnection.forStdio(),
+      });
+      const started = Promise.resolve().then(() => client.start()).then(async () => {
+        // Startup can finish after its cancellation race has already cleaned up.
+        if (signal?.aborted) {
+          await cleanup(() => client.forceStop(), cleanupTimeoutMs);
+          throw abortError(signal);
+        }
+      });
+      await Promise.race([started, cancelled]);
+      if (signal?.aborted) throw abortError(signal);
+      const auth = await Promise.race([client.getAuthStatus(), cancelled]);
+      if (signal?.aborted) throw abortError(signal);
+      if (!auth.isAuthenticated || auth.authType !== 'user') {
+        throw new Error('GitHub CopilotのOAuthログインが必要です。ターミナルで copilot login を実行してください。');
+      }
+      return {client, workingDirectory};
+    } catch (error) {
+      await disposeRuntime({client, workingDirectory});
+      throw error;
+    } finally {signal?.removeEventListener('abort', cancel);}
+  }
+  const preparation = createPreparation({create: createRuntime, dispose: disposeRuntime, ttlMs: preparationTtlMs});
+  const generateCopilot = async function ({ prompt, model, signal, purpose = 'reply' }) {
     if (typeof prompt !== 'string' || !prompt.trim()) {
       throw new Error('Copilotへ送信する文章がありません。');
     }
@@ -55,17 +114,7 @@ export function createCopilotGenerator({
     if (!['reply', 'plan', 'prompt'].includes(purpose)) throw new Error('Copilotの生成用途が不正です。');
     if (signal?.aborted) throw abortError(signal);
 
-    let sdk;
-    try {
-      sdk = await loadSdk();
-    } catch (error) {
-      throw new Error('Copilot SDKを読み込めません。Node.js 22.12以上で npm install を実行してください。', { cause: error });
-    }
-    if (signal?.aborted) throw abortError(signal);
-
-    const temporaryRoot = resolve(tmpdir());
-    const workingDirectory = await mkdtemp(join(temporaryRoot, 'backlog-ai-copilot-'));
-    let client;
+    const {client, workingDirectory} = await preparation.take({signal});
     let session;
     let cancel;
     let rejectCancellation;
@@ -80,27 +129,11 @@ export function createCopilotGenerator({
     };
 
     try {
-      client = new sdk.CopilotClient({
-        // SDK 1.0.27's "empty" mode disables the OS keychain. Preserve normal
-        // CLI OAuth login and explicitly disable ambient session capabilities.
-        useLoggedInUser: true,
-        workingDirectory,
-        logLevel: 'none',
-        env: runtimeEnvironment(),
-        // The bundled 1.0.27 runtime is not the interactive CLI and rejects CLI
-        // flags such as --disable-builtin-mcps. Configure it through the SDK.
-        connection: sdk.RuntimeConnection.forStdio(),
-      });
       cancel = () => {
         rejectCancellation(abortError(signal));
         void client.forceStop().catch(() => {});
       };
       signal?.addEventListener('abort', cancel, { once: true });
-      await checked(() => client.start());
-      const auth = await checked(() => client.getAuthStatus());
-      if (!auth.isAuthenticated || auth.authType !== 'user') {
-        throw new Error('GitHub CopilotのOAuthログインが必要です。ターミナルで copilot login を実行してください。');
-      }
       await checked(async () => {
         session = await client.createSession({
           ...(model?.trim() ? { model: model.trim() } : {}),
@@ -166,20 +199,12 @@ export function createCopilotGenerator({
         await cleanup(() => session.disconnect(), cleanupTimeoutMs);
         await cleanup(() => client.deleteSession(session.sessionId), cleanupTimeoutMs);
       }
-      if (client) {
-        const stopped = await cleanup(async () => {
-          const errors = await client.stop();
-          if (errors?.length) throw errors[0];
-        }, cleanupTimeoutMs);
-        if (!stopped) await cleanup(() => client.forceStop(), cleanupTimeoutMs);
-      }
-      // Delete only the newly generated temporary directory owned by this call.
-      const target = resolve(workingDirectory);
-      if (target.startsWith(temporaryRoot + sep) && target !== temporaryRoot) {
-        await cleanup(() => rm(target, { recursive: true, force: true }), cleanupTimeoutMs);
-      }
+      await disposeRuntime({client, workingDirectory});
     }
   };
+  generateCopilot.prepare = preparation.prepare;
+  generateCopilot.disposePrepared = preparation.clear;
+  return generateCopilot;
 }
 
 export const generateCopilot = createCopilotGenerator();

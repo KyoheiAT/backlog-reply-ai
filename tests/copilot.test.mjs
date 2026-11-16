@@ -20,7 +20,7 @@ function fixture(overrides = {}) {
   };
   class CopilotClient {
     constructor(options) { state.clientOptions = options; }
-    async start() { calls.push('start'); if (overrides.startError) throw overrides.startError; }
+    async start() { calls.push('start'); if (overrides.startError) throw overrides.startError; if (overrides.start) await overrides.start(); }
     async getAuthStatus() { calls.push('auth'); return overrides.auth ?? { isAuthenticated: true, authType: 'user' }; }
     async createSession(config) { calls.push('create'); state.config = config; return session; }
     async deleteSession(id) { calls.push('delete'); assert.equal(id, session.sessionId); }
@@ -68,6 +68,51 @@ test('uses SDK model default when model is empty and creates separate sessions',
   assert.equal(Object.hasOwn(state.config, 'model'), false);
   assert.notEqual(state.clientOptions.workingDirectory, firstDirectory);
   assert.equal(state.calls.filter((call) => call === 'create').length, 2);
+});
+
+test('preparation starts OAuth runtime without a session or prompt and generation consumes it once', async () => {
+  const {generate, state} = fixture();
+  await Promise.all([generate.prepare(), generate.prepare()]);
+  const directory = state.clientOptions.workingDirectory;
+  assert.deepEqual(state.calls, ['start', 'auth']);
+  assert.equal(state.config, undefined);
+  assert.equal(state.message, undefined);
+  await generate({prompt: 'prepared reply', model: 'chosen-after-preparation'});
+  assert.equal(state.config.model, 'chosen-after-preparation');
+  assert.equal(state.clientOptions.workingDirectory, directory);
+  assert.equal(state.calls.filter(call => call === 'start').length, 1);
+  await assert.rejects(access(directory), {code: 'ENOENT'});
+  await generate({prompt: 'another reply'});
+  assert.equal(state.calls.filter(call => call === 'start').length, 2);
+  assert.notEqual(state.clientOptions.workingDirectory, directory);
+});
+
+test('abandoned preparation stops runtime and removes its empty workspace without generating', async () => {
+  const {generate, state} = fixture();
+  await generate.prepare();
+  await generate.disposePrepared();
+  assert.deepEqual(state.calls, ['start', 'auth', 'stop']);
+  await assert.rejects(access(state.clientOptions.workingDirectory), {code: 'ENOENT'});
+});
+
+test('cancelled preparation also stops a runtime whose startup finishes late', async () => {
+  let completeStartup;
+  let started;
+  const startup = new Promise(resolve => {completeStartup = resolve;});
+  const entered = new Promise(resolve => {started = resolve;});
+  const {generate, state} = fixture({start: () => {started(); return startup;}});
+  const controller = new AbortController();
+  const warm = generate.prepare({signal: controller.signal});
+  await entered;
+  controller.abort();
+  await assert.rejects(warm, {name: 'AbortError'});
+  const stops = state.calls.filter(call => call === 'forceStop').length;
+  completeStartup();
+  for (let i = 0; i < 15; i++) await Promise.resolve();
+  assert.ok(state.calls.filter(call => call === 'forceStop').length > stops);
+  assert.equal(state.calls.includes('create'), false);
+  assert.equal(state.calls.includes('send'), false);
+  await assert.rejects(access(state.clientOptions.workingDirectory), {code: 'ENOENT'});
 });
 
 test('removes ambient API keys and tokens without modifying parent environment', async () => {
